@@ -10,7 +10,8 @@ This project is a fork of [Modded-NanoGPT](https://github.com/KellerJordan/modde
 
 ## Objective
 
-Train a langauge model on a subset of the **FineWeb** dataset to reach a validation loss of **≤ 3.3821** as fast as possible using **1 GPU**.
+Prototype your idea on a subset of the **FineWeb** dataset using **1 GPU**.  
+**(Optional) goal:** reach a validation loss of **≤ 3.3821** faster than the baseline.
 
 You can achieve this by:
 - making your model faster (so that it sees more data in shorter time)
@@ -69,7 +70,7 @@ python data/cached_fineweb10B.py
 
 ## Benchmarks
 
-Here’s the current leaderboard. If the baseline improves, we’ll update it here for reference.
+Below is a reference leaderboard. Beating it is awesome, but **sub-baseline runs are still valuable when they demonstrate a creative idea.**
 
 **Train a neural network to ≤ 3.3821 validation loss on FineWeb using 1 GPU.**
 
@@ -83,9 +84,9 @@ Note: The current baseline used one RTX 4090. It took 4768 steps/iterations and 
 
 ## Rules
 
-1. Reach validation loss <= 3.3821 in shorter time.
+1. **Optional:** reach validation loss ≤ 3.3821 in shorter time.
 2. Do **not** introduce new datasets, but feel free to modify the current.
-
+3. Document your idea in `IDEA.md` (motivation, method, results). Negative results are welcome—share what you learned!
 
 If you use a different GPU than RTX 4090, benchmark the baseline and compare your speedup to that result, for example, if the baseline takes 10 hours on your setup, but your solution takes only 8 hours, then thats your speedup that you can report to us! Keep the comparison fair, if you increase the learning rate for your solution, try increasing it also for the baseline.
 
@@ -97,7 +98,12 @@ git bundle create <first name>-<last name>.bundle --all
 ```
 Then send us your .bundle file to hey@bottlecapai.com
 
-Do **not** create a public pull request.
+**Didn’t beat the baseline?** No worries – send the bundle anyway **plus a short `IDEA.md`** describing:  
+• what you tried & why 
+• what worked 
+• what didn’t.  
+
+**Beat the baseline?** Great! Add a `RESULTS.md` with timing, settings, and hardware so others can reproduce it.
 
 ---
 ## Technical Notes
