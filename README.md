@@ -51,9 +51,9 @@ The dataset is pre-tokenized so that you don't have to do that yourself (saves t
 
 ---
 
-## Running the current baseline 
+## Running the baseline 
 
-To run the current baseline, run the following commands.
+To run the baseline, run the following commands.
 ```bash
 git clone https://github.com/BottleCapAI/modded-nanogpt && cd modded-nanogpt
 pip install -r requirements.txt
@@ -80,7 +80,7 @@ Below is a reference leaderboard. Beating it is awesome, but **sub-baseline runs
 2 | 3.88 hours | custom attention mask, increased context length, variable context length | 28/06/25 | -   | [filipmihal](https://github.com/filipmihal)
 
 
-Note: The current baseline used one RTX 4090. It took 4768 steps/iterations and used in total 2.5B tokens.
+Note: The baseline used one RTX 4090. It took 4768 steps/iterations and used in total 2.5B tokens.
 
 ![wandb_loss](img/wandb_loss.png)
 
