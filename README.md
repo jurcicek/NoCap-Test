@@ -34,6 +34,7 @@ You're encouraged to try new techniques to speed up language modeling such as bu
 - Modify the architecture (Mixture of Experts? Different attention?)
 - Come up with a different training algorithm
 - Modify the training data
+- New architecture!
 
 You're **not** expected to:
 - Just bump up the learning rate
