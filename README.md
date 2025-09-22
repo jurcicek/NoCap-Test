@@ -130,3 +130,17 @@ While this project is designed to run on **1 GPU**, there are a few things to ke
 
 The target metric is cross-entropy loss on the FineWeb val set. The goal of the speedrun is to obtain a probability model of language which assigns a probability of at least `math.exp(-3.3821 * 1048576)` to the first 1,048,576 tokens of the FineWeb valset. Hence, we allow evaluation at any sequence length, so long as we still have a valid probability model of language on the **entire** validation set.
 
+## 📌 About BottleCapAI
+
+At **BottleCapAI**, we’re making large language models **radically more efficient** — aiming for **100× improvements** over today’s approaches. 🚀  
+
+### 👥 Our team
+- **Tomas Mikolov** – creator of *word2vec*, pioneer of neural language models.  
+- **Jaroslav Beck** – co-founder of *Beat Games* (*Beat Saber*, 10M+ copies sold, acquired by Meta).  
+- **David Herel** – creator of **Thinking Tokens**, co-founder of an **AI trading startup**, and **Amazon Alexa Prize finalist**.
+
+### 🌍 Our vision
+Training frontier LLMs costs **tens of millions** today. Our new algorithms already cut that by **~50%** — and we’re just getting started. We’re building a European hub to push AI forward through **algorithms, not brute force**.  
+
+👉 Join us: [NoCap-Test](https://github.com/BottleCapAI/NoCap-Test)  
+📧 **hey@bottlecapai.com** · 🌐 [bottlecapai.com](https://www.bottlecapai.com)  
