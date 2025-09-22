@@ -29,7 +29,7 @@ Training frontier LLMs costs **tens of millions** today. Our new algorithms alre
 - **2nd place:** $2,000 USD  
 - **3rd place:** $1,000 USD  
 
-**Submission deadline:** **11.11.2025** (dd.mm.yyyy)
+**Submission deadline:** **11.11.2025** 
 
 Prizes are awarded based on the best validated results shared via the submission process below. Ties may be broken by total training time and clarity of write-up.
 
