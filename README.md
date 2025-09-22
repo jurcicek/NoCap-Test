@@ -77,7 +77,9 @@ Below is a reference leaderboard. Beating it is awesome, but **sub-baseline runs
 | # | Record time | Description                                                   | Date     | Log | Contributors |
 | - | - |---------------------------------------------------------------|----------|-----| - |
 1 | 5.401 hours | [baseline](https://github.com/KellerJordan/modded-nanogpt) | 11/04/25 | [log](pylog124M/14e37fbb-cc64-4185-a1a7-5ef956b56ac7.log)   | [contributors-of-modded-nanoGPT](https://github.com/KellerJordan/modded-nanogpt)
-2 | 3.88 hours | custom attention mask, increased context length, variable context length | 28/06/25 | -   | [filipmihal](https://github.com/filipmihal)
+2 | 4.86 hours | gated embedding projection | 20/08/25 | -   | [adam-osusky](https://github.com/adam-osusky)
+3 | 3.88 hours | custom attention mask, increased context length, variable context length | 28/06/25 | -   | [filipmihal](https://github.com/filipmihal)
+
 
 
 Note: The baseline used one RTX 4090. It took 4768 steps/iterations and used in total 2.5B tokens.
