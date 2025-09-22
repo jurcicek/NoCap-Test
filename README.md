@@ -2,7 +2,7 @@
 
 ![logo](img/logo.png)
 Hey there! Are you interested in LLMs? Do you like experimenting with neural networks, implementing different ideas and testing them out? Would you like to do that for a living? Then you're in the right place!
-This is an official open test for (not only) people interested in joining [BottleCapAI](https://www.bottlecapai.com).
+This is an official open test for people interested in joining [BottleCapAI](https://www.bottlecapai.com).
 
 This project is a fork of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) :heart:, rewritten with minimal changes to run on a single GPU (e.g. RTX 3090/4090)
 
@@ -18,8 +18,7 @@ At **BottleCapAI**, we’re making large language models **radically more effici
 
 ### 🌍 Our vision
 Training frontier LLMs costs **tens of millions** today. Our new algorithms already cut that by **~50%** — and we’re just getting started. We’re building a European hub to push AI forward through **algorithms, not brute force**.  
-
-👉 Join us: [NoCap-Test](https://github.com/BottleCapAI/NoCap-Test)  
+ 
 📧 **hey@bottlecapai.com** · 🌐 [bottlecapai.com](https://www.bottlecapai.com)  
 
 ---
@@ -117,7 +116,7 @@ To submit your results, run:
 ```bash
 git bundle create <first name>-<last name>.bundle --all
 ```
-Then send us your .bundle file to hey@bottlecapai.com
+Then send us your .bundle file to hey@bottlecapai.com with subject in format: \<first name\>-\<last name\> \<percentage speedup (dont worry if it's negative)\>.
 
 **Didn’t beat the baseline?** No worries – send the bundle anyway **plus a short `IDEA.md`** describing:  
 • what you tried & why 
@@ -125,6 +124,8 @@ Then send us your .bundle file to hey@bottlecapai.com
 • what didn’t.  
 
 **Beat the baseline?** Great! Add a `RESULTS.md` with timing, settings, and hardware so others can reproduce it.
+
+At this moment, we are interested mainly in candidates willing to relocate to Prague.
 
 ---
 ## Technical Notes
