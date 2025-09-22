@@ -134,7 +134,7 @@ The target metric is cross-entropy loss on the FineWeb val set. The goal of the 
 
 At **BottleCapAI**, we’re making large language models **radically more efficient** — aiming for **100× improvements** over today’s approaches. 🚀  
 
-### 👥 Our team
+### 👥 Founders
 - **Tomas Mikolov** – creator of *word2vec*, pioneer of neural language models.  
 - **Jaroslav Beck** – co-founder of *Beat Games* (*Beat Saber*, 10M+ copies sold, acquired by Meta).  
 - **David Herel** – creator of **Thinking Tokens**, co-founder of an **AI trading startup**, and **Amazon Alexa Prize finalist**.
