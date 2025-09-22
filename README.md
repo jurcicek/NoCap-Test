@@ -12,14 +12,27 @@ This project is a fork of [Modded-NanoGPT](https://github.com/KellerJordan/modde
 At **BottleCapAI**, we’re making large language models **radically more efficient** — aiming for **100× improvements** over today’s approaches. 🚀  
 
 ### 👥 Founders
-- **Tomas Mikolov** – creator of *word2vec*, pioneer of neural language models.  
-- **Jaroslav Beck** – co-founder of *Beat Games* (*Beat Saber*, 10M+ copies sold, acquired by Meta).  
-- **David Herel** – creator of **Thinking Tokens**, co-founder of an **AI trading startup**, and **Amazon Alexa Prize finalist**.
+- Tomas Mikolov – creator of *word2vec*, pioneer of neural language models.  
+- Jaroslav Beck – co-founder of *Beat Games* (*Beat Saber*, 10M+ copies sold, acquired by Meta).  
+- David Herel – creator of Thinking Tokens, co-founder of an AI trading startup, and Amazon Alexa Prize finalist.
 
 ### 🌍 Our vision
 Training frontier LLMs costs **tens of millions** today. Our new algorithms already cut that by **~50%** — and we’re just getting started. We’re building a European hub to push AI forward through **algorithms, not brute force**.  
  
-📧 **hey@bottlecapai.com** · 🌐 [bottlecapai.com](https://www.bottlecapai.com)  
+📧 **hey(at)bottlecapai.com** · 🌐 [bottlecapai.com](https://www.bottlecapai.com)  
+
+---
+
+## 🏆 Prizes & Deadline
+
+- **1st place:** $3,000 USD  
+- **2nd place:** $2,000 USD  
+- **3rd place:** $1,000 USD  
+
+**Submission deadline:** **11.11.2025** (dd.mm.yyyy)
+
+Prizes are awarded based on the best validated results shared via the submission process below. Ties may be broken by total training time and clarity of write-up.
+
 
 ---
 
@@ -116,7 +129,7 @@ To submit your results, run:
 ```bash
 git bundle create <first name>-<last name>.bundle --all
 ```
-Then send us your .bundle file to hey@bottlecapai.com with subject in format: \<first name\>-\<last name\> \<percentage speedup (dont worry if it's negative)\>.
+Then send us your .bundle file to hey(at)bottlecapai.com with subject in format: \<first name\>-\<last name\> \<percentage speedup (dont worry if it's negative)\>.
 
 **Didn’t beat the baseline?** No worries – send the bundle anyway **plus a short `IDEA.md`** describing:  
 • what you tried & why 
