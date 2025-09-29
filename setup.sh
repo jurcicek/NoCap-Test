@@ -39,7 +39,7 @@ fi
 
 # Environment name
 ENV_NAME="nocap-test"
-PYTHON_VERSION="3.10"
+PYTHON_VERSION="3.11"
 
 print_status "Setting up conda environment: $ENV_NAME"
 
