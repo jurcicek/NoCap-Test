@@ -49,8 +49,8 @@ You can achieve this by:
 
 ## What's the point?
 
-We're not here to optimize learning rates, CUDA kernels, or torch.compile flags.  
-We're here to explore **algorithmic ideas that might scale**.
+We're not here to optimize learning rates and torch.compile flags.  
+We're here to explore **algorithmic ideas that might scale**, and if that means writing your own CUDA kernel, even better.
 
 This benchmark is meant for:
 - People with limited hardware
@@ -138,7 +138,7 @@ Then send us your .bundle file to hey(at)bottlecapai.com with subject in format:
 
 **Beat the baseline?** Great! Add a `RESULTS.md` with timing, settings, and hardware so others can reproduce it.
 
-At this moment, we are interested mainly in candidates willing to relocate to Prague.
+At this moment, we are interested mainly in candidates willing to relocate to Prague. (If you’re an exceptional fit, we’re happy to discuss possible support options.)
 
 ---
 ## Technical Notes
