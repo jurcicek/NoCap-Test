@@ -4,10 +4,10 @@ torchrun --standalone --nproc_per_node=1 train_gpt2_mod.py \
   --output_dir pylog124M_mod \
   --model d12_mla_flash \
   --batch_size 12 \
-  --grad_accumulation_steps 32 \
+  --grad_accumulation_steps 42 \
   --sequence_length 1024 \
   --val_loss_every 128 \
-  --val_batch_size 12 \
+  --val_batch_size 8 \
   --num_iterations 4768 \
   --weight_decay 0.1 \
   --learning_rate 0.0018 \
