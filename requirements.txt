@@ -50,3 +50,4 @@ wandb==0.19.9
 wheel==0.45.1
 xxhash==3.5.0
 yarl==1.19.0
+flash-attn==2.5.8

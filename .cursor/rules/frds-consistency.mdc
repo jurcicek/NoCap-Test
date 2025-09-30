@@ -1,0 +1,8 @@
+---
+description: FRDs consistency
+globs:
+alwaysApply: true
+---
+
+When working on FRDs, and tasks for FRDs, be consistent. Both FRDs and tasks structure should be similar and should not not deviate at random. 
+

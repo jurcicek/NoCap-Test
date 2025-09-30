@@ -7,7 +7,7 @@ torchrun --standalone --nproc_per_node=1 train_gpt2.py \
   --grad_accumulation_steps 32 \
   --sequence_length 1024 \
   --val_loss_every 128 \
-  --val_batch_size 16 \
+  --val_batch_size 12 \
   --num_iterations 4768 \
   --weight_decay 0.1 \
   --learning_rate 0.0018 \
