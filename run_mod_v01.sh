@@ -2,7 +2,7 @@ torchrun --standalone --nproc_per_node=1 train_gpt2_mod.py \
   --input_bin "data/fineweb10B/fineweb_train_*.bin" \
   --input_val_bin "data/fineweb10B/fineweb_val_*.bin" \
   --output_dir pylog124M_mod \
-  --model d12_flash_mla \
+  --model d12_mla_flash \
   --batch_size 12 \
   --grad_accumulation_steps 32 \
   --sequence_length 1024 \
