@@ -4,3 +4,4 @@ logs/
 wandb/
 __pycache__/ 
 __pycache__/train_gpt2_mod.cpython-39.pyc
+pylog124M_mod/*.log

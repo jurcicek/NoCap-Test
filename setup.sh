@@ -69,11 +69,6 @@ pip install --upgrade pip
 print_status "Installing CUDA toolkit..."
 conda install -c nvidia cuda-toolkit=12.8 -y
 
-# # Install PyTorch with CUDA support
-# print_status "Installing PyTorch with CUDA support..."
-# # Using CUDA 12.8 as it's compatible with the requirements
-# conda install pytorch torchvision torchaudio pytorch-cuda=12.8 -c pytorch -c nvidia -y
-
 # Install other ML and data science packages
 print_status "Installing core ML packages..."
 conda install -c conda-forge numpy pandas scipy scikit-learn matplotlib seaborn jupyter -y

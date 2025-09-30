@@ -17,6 +17,8 @@ from torch.distributed import init_process_group, destroy_process_group
 with open(sys.argv[0]) as f:
     code = f.read()
 
+torch.set_float32_matmul_precision('high')
+
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the GPT-2 model
 

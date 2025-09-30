@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2025-09-30
+
+### Removed
+- **FlashCausalSelfAttention Class**: Removed FlashAttention-2 based attention mechanism implementation
+- **Flash-attn Library Dependency**: Removed `flash-attn` import and dependency from the project
+- **FlashAttention Configuration**: Removed `use_flash_attention` parameter from GPTConfig
+- **Flash Model Variants**: Removed `d12_flash` and `d12_mla_flash` model configurations
+- **FlashAttention from MultiHeadLatentAttention**: Removed `use_flash` parameter and flash attention logic from latent attention
+
+### Changed
+- **Block Architecture**: Simplified Block class to support only CausalSelfAttention and MultiHeadLatentAttention without flash attention
+- **MultiHeadLatentAttention**: Now exclusively uses standard PyTorch scaled_dot_product_attention instead of FlashAttention
+- **Model Configurations**: Updated base_configs to remove flash attention variants, keeping only standard and latent attention options
+- **Benchmark Function**: Updated benchmark_attention_mechanisms to exclude flash attention mechanisms
+
+### Rationale
+- Simplified codebase by removing external flash attention dependency
+- All attention operations now use standard PyTorch built-in attention mechanisms
+- Maintains backward compatibility for non-flash attention models
+
 ## [1.0.3] - 2025-09-30
 
 ### Added
