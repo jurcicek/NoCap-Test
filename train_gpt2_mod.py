@@ -119,8 +119,7 @@ class CausalSelfAttention(nn.Module):
 class MultiHeadLatentAttention(nn.Module):
     """Multi-Head Latent Attention for reduced complexity attention computation.
     
-    Implements attention in a reduced latent space to achieve O(n×d) complexity
-    instead of O(n²) where d << n. Supports post_norm and qk_norm.
+    Implements attention in a reduced latent space. Supports post_norm and qk_norm.
     
     Args:
         config: Model configuration containing attention parameters
@@ -129,43 +128,33 @@ class MultiHeadLatentAttention(nn.Module):
         qk_norm: If True, apply Query-Key normalization before rotary embedding
     """
 
-    def __init__(self, config, n_latent=None, post_norm=False, qk_norm=False):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.post_norm = post_norm
-        self.qk_norm = qk_norm
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        self.n_latent = config.n_latent
         self.head_dim = self.n_embd // self.n_head
-        self.n_latent = n_latent or self.n_embd
         assert self.n_embd % self.n_head == 0
-        
-        # Latent projection layers
-        self.latent_proj = nn.Linear(self.n_embd, self.n_latent, bias=False)
-        self.latent_proj_back = nn.Linear(self.n_latent, self.n_embd, bias=False)
         
         # Attention projections in latent space
         self.latent_head_dim = self.n_latent // self.n_head
         assert self.n_latent % self.n_head == 0
         
-        # key, query, value projections in latent space
-        self.c_attn = nn.Linear(self.n_latent, 3 * self.n_latent, bias=False)
-        # output projection
-        self.c_proj = nn.Linear(self.n_latent, self.n_latent, bias=False)
+        # Fused input projection: directly produce QKV in latent space from input
+        self.c_attn_fused = nn.Linear(self.n_embd, 3 * self.n_latent, bias=False)
+        # Fused output projection: map latent output back to model dimension
+        self.out_proj_fused = nn.Linear(self.n_latent, self.n_embd, bias=False)
         self.rotary = Rotary(self.latent_head_dim)
-        
-        # Post-normalization layer if enabled
-        if self.post_norm:
-            self.ln = nn.LayerNorm(self.n_embd)
+
+        print(f"Applying Multi-Head Latent Attention {self.n_embd=} {self.n_head=} {self.head_dim=}")
+        print(f"Applying Multi-Head Latent Attention {self.n_latent=} {self.latent_head_dim=}")
 
     def forward(self, x, attention_mask=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
         
-        # Project to latent space
-        x_latent = self.latent_proj(x)  # (B, T, n_latent)
-        
-        # calculate query, key, values in latent space
-        qkv = self.c_attn(x_latent)
+        # Calculate query, key, values in latent space (fused input projection)
+        qkv = self.c_attn_fused(x)
         q, k, v = qkv.split(self.n_latent, dim=2)
         
         # Reshape for multi-head attention in latent space
@@ -174,7 +163,7 @@ class MultiHeadLatentAttention(nn.Module):
         v = v.view(B, T, self.n_head, self.latent_head_dim)
         
         # Apply QK normalization before rotary embedding if enabled
-        if self.qk_norm:
+        if self.config.qk_norm:
             q = rmsnorm(q, eps=1e-6)
             k = rmsnorm(k, eps=1e-6)
         
@@ -190,17 +179,120 @@ class MultiHeadLatentAttention(nn.Module):
         )
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_latent)
         
-        # Output projection in latent space
-        y = self.c_proj(y)
-        
-        # Project back to original space
-        y = self.latent_proj_back(y)  # (B, T, n_embd)
-        
-        # Apply post-normalization if enabled
-        if self.post_norm:
-            y = self.ln(y)
+        # Fused output projection to original space
+        y = self.out_proj_fused(y)  # (B, T, n_embd)
         
         return y
+
+
+class SlidingWindowAttention(nn.Module):
+    """Efficient sliding window attention implementation.
+    
+    Uses vectorized operations to compute attention over a sliding window of tokens,
+    reducing computational complexity from O(n²) to O(n×w) where w is the window size.
+    
+    Supports:
+    - Configurable window size
+    - Causal masking (can only see previous tokens)
+    - Optional Query-Key normalization
+    - Rotary positional embeddings
+    """
+    
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        self.window_size = getattr(config, 'window_size', 64)
+        
+        assert self.n_embd % self.n_head == 0
+        
+        # Key, query, value projections
+        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
+        # Output projection
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.rotary = Rotary(self.head_dim)
+        
+        print(f"SlidingWindowAttention: window_size={self.window_size}, n_head={self.n_head}, head_dim={self.head_dim}")
+
+    def forward(self, x):
+        B, T, C = x.size()
+        
+        # Calculate Q, K, V
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        
+        # Reshape for multi-head attention
+        q = q.view(B, T, self.n_head, self.head_dim)
+        k = k.view(B, T, self.n_head, self.head_dim)
+        v = v.view(B, T, self.n_head, self.head_dim)
+        
+        # Apply QK normalization if enabled
+        if getattr(self.config, 'qk_norm', False):
+            q = rmsnorm(q, eps=1e-6)
+            k = rmsnorm(k, eps=1e-6)
+        
+        # Apply rotary embeddings
+        cos, sin = self.rotary(q)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        
+        # Efficient sliding window attention
+        y = self._sliding_window_attention(q, k, v)
+        
+        # Output projection
+        y = self.c_proj(y)
+        return y
+    
+    def _sliding_window_attention(self, q, k, v):
+        """Vectorized sliding window attention computation."""
+        B, T, H, D = q.shape
+        window_size = min(self.window_size, T)  # Don't exceed sequence length
+        
+        # Transpose for attention: (B, H, T, D)
+        q = q.transpose(1, 2)  # (B, H, T, D)
+        k = k.transpose(1, 2)  # (B, H, T, D)
+        v = v.transpose(1, 2)  # (B, H, T, D)
+        
+        # Create sliding windows using unfold
+        # Pad k and v to handle the sliding window
+        pad_size = window_size - 1
+        k_padded = F.pad(k, (0, 0, pad_size, 0))  # Pad at the beginning
+        v_padded = F.pad(v, (0, 0, pad_size, 0))
+        
+        # Create sliding windows: (B, H, T, window_size, D)
+        k_windows = k_padded.unfold(2, window_size, 1)  # (B, H, T, window_size, D)
+        v_windows = v_padded.unfold(2, window_size, 1)  # (B, H, T, window_size, D)
+        
+        # Compute attention scores
+        # q: (B, H, T, D), k_windows: (B, H, T, window_size, D)
+        scores = torch.matmul(q.unsqueeze(3), k_windows.transpose(-2, -1))  # (B, H, T, 1, window_size)
+        scores = scores.squeeze(3) / math.sqrt(D)  # (B, H, T, window_size)
+        
+        # Apply causal mask by masking out future positions within each window
+        # For position i, we can only attend to positions [i-window_size+1, i]
+        causal_mask = torch.zeros(B, H, T, window_size, device=q.device, dtype=scores.dtype)
+        for i in range(T):
+            # For each position i, mask out positions that are beyond i
+            for j in range(window_size):
+                if j > i:  # This would be a future position
+                    causal_mask[:, :, i, j] = float('-inf')
+        
+        scores = scores + causal_mask
+        
+        # Softmax over the window dimension
+        attn_weights = F.softmax(scores, dim=-1)  # (B, H, T, window_size)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights.unsqueeze(3), v_windows)  # (B, H, T, 1, D)
+        attn_output = attn_output.squeeze(3)  # (B, H, T, D)
+        
+        # Transpose back and reshape
+        attn_output = attn_output.transpose(1, 2).contiguous()  # (B, T, H, D)
+        attn_output = attn_output.view(B, T, self.n_embd)
+        
+        return attn_output
 
 
 class MLP(nn.Module):
@@ -218,13 +310,16 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    """Transformer block with conditional hybrid pre/post normalization and attention options.
+    """Transformer block with conditional hybrid pre/post normalization and multiple attention options.
     
     Supports pre-norm only (GPT-2 style) or hybrid pre/post-norm architectures
     based on config.post_norm flag. Hybrid mode applies both input and output
     normalization for enhanced training stability.
     
-    Supports Multi-Head Latent Attention for improved performance.
+    Supports multiple attention mechanisms:
+    - Standard CausalSelfAttention
+    - Multi-Head Latent Attention for reduced complexity
+    - SlidingWindowAttention for efficient long sequences
     """
 
     def __init__(self, config):
@@ -232,16 +327,13 @@ class Block(nn.Module):
         self.config = config  # Store config reference for conditional logic
         
         # Initialize attention mechanism based on configuration
-        if config.use_latent_attention:
-            # Use Multi-Head Latent Attention
-            self.attn = MultiHeadLatentAttention(
-                config,
-                n_latent=config.n_latent,
-                post_norm=config.post_norm,
-                qk_norm=config.qk_norm
-            )
-        else:
-            # Use standard CausalSelfAttention
+        attention_type = getattr(config, 'attention_type', 'standard')
+        
+        if attention_type == 'sliding_window':
+            self.attn = SlidingWindowAttention(config)
+        elif config.use_latent_attention or attention_type == 'latent':
+            self.attn = MultiHeadLatentAttention(config)
+        else:  # standard or default
             self.attn = CausalSelfAttention(config)
         
         self.mlp = MLP(config)
@@ -269,12 +361,15 @@ class GPTConfig:
     
     Args:
         post_norm: If True, use hybrid pre/post-normalization (OLMo 2 style + input norm).
-                  If False, use pre-normalization only (GPT-2 style).
+                   If False, use pre-normalization only (GPT-2 style).
         qk_norm: If True, apply Query-Key normalization before rotary embedding.
-                If False, use standard attention without QK normalization.
+                 If False, use standard attention without QK normalization.
         use_latent_attention: If True, use Multi-Head Latent Attention for reduced complexity.
-                             If False, use standard attention mechanism.
+                              If False, use standard attention mechanism.
         n_latent: Dimension of latent space for latent attention.
+        attention_type: Type of attention mechanism to use.
+                        Options: 'standard', 'latent', 'sliding_window'
+        window_size: Window size for sliding window attention (only used if attention_type='sliding_window').
     """
     vocab_size: int = 50257
     n_layer: int = 12
@@ -284,6 +379,8 @@ class GPTConfig:
     qk_norm: bool = False    # Query-Key normalization
     use_latent_attention: bool = False  # Latent attention for reduced complexity
     n_latent: int = 384  # Latent space dimension
+    attention_type: str = "standard"  # Attention mechanism type
+    window_size: int = 64  # Window size for sliding window attention
 
 
 class GPT(nn.Module):
@@ -553,7 +650,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="d12",
-        help="d12|d12_post_norm|d12_post_norm_qk_norm|d24|d36|d48",
+        help="d12|d12_post_norm|d12_post_norm_qk_norm|d12_mla|d12_window|d12_window_large|d24|d36|d48",
     )
     # token layout for each step of the optimization
     parser.add_argument(
@@ -620,7 +717,10 @@ if __name__ == "__main__":
 
     # args error checking and convenience variables
     B, T = args.batch_size, args.sequence_length
-    assert args.model in {"d12", "d12_post_norm", "d12_post_norm_qk_norm", "d12_mla", "d24", "d36", "d48"}
+    assert args.model in {
+        "d12", "d12_post_norm", "d12_post_norm_qk_norm", "d12_mla", 
+        "d12_window", "d12_window_large", "d24", "d36", "d48"
+    }
     # set up DDP (distributed data parallel). torchrun sets this env variable
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
     assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
@@ -647,8 +747,8 @@ if __name__ == "__main__":
         start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         wandb.init(project="benchmark_gpt2", name=f"gpt2-{args.model} {start_time}")
         wandb.config.update(args)
-        wandb.save("train_gpt2.py")
-        wandb.save("run.sh")
+        wandb.save("train_gpt2_mod.py")
+        wandb.save("run_mod.sh")
 
     tokens_per_iter = B * T * ddp_world_size * args.grad_accumulation_steps
     print0(f"tokens per iteration: {tokens_per_iter:,}")
@@ -683,9 +783,17 @@ if __name__ == "__main__":
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, post_norm=True, qk_norm=True
         ),  # 124M GPT-2 with hybrid normalization + QK normalization
         "d12_mla": GPTConfig(
-            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
-            post_norm=True, qk_norm=True, use_latent_attention=True, n_latent=384
+            vocab_size=num_vocab, n_layer=12, n_head=16, n_embd=1024,
+            post_norm=True, qk_norm=True, use_latent_attention=True, n_latent=256
         ),  # 124M GPT-2 with MLA + post-norm + QK norm
+        "d12_window": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
+            post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=64
+        ),  # 124M GPT-2 with sliding window attention
+        "d12_window_large": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
+            post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=128
+        ),  # 124M GPT-2 with large sliding window attention
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),
         "d48": GPTConfig(vocab_size=num_vocab, n_layer=48, n_head=25, n_embd=1600),
