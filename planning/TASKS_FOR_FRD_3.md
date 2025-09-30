@@ -71,7 +71,7 @@ Create a `MultiHeadLatentAttention` class that implements reduced complexity att
 ### Interface to Implement
 ```python
 class MultiHeadLatentAttention(nn.Module):
-    def __init__(self, config, latent_dim=None, post_norm=False, qk_norm=False):
+    def __init__(self, config, n_latent=None, post_norm=False, qk_norm=False):
         # Initialize with config, latent dimension, and normalization options
         pass
     
@@ -81,7 +81,7 @@ class MultiHeadLatentAttention(nn.Module):
 ```
 
 ### Algorithm to Implement
-1. **Input Projection**: Project input to latent space if `latent_dim` is specified
+1. **Input Projection**: Project input to latent space if `n_latent` is specified
 2. **Query, Key, Value Generation**: Generate Q, K, V in latent space
 3. **Rotary Position Embedding**: Apply RoPE if configured
 4. **Query-Key Normalization**: Apply QK normalization if `qk_norm=True`
@@ -107,7 +107,7 @@ Implement a `FlashMLA` class that combines FlashAttention-2 with Multi-Head Late
 ### Interface to Implement
 ```python
 class FlashMLA(nn.Module):
-    def __init__(self, config, use_latent_attention=False, latent_dim=None, 
+    def __init__(self, config, use_latent_attention=False, n_latent=None, 
                  post_norm=False, qk_norm=False):
         # Initialize with all configuration options
         pass
@@ -144,7 +144,7 @@ Add new configuration options to support FlashMLA and create new model configura
 # Add to model configuration
 use_flash_mla: bool = False
 use_latent_attention: bool = False
-latent_dim: Optional[int] = None
+n_latent: Optional[int] = None
 
 # Create new configuration
 d12_flash_mla = GPTConfig(

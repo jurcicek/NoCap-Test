@@ -14,6 +14,12 @@ import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+from flash_attn import flash_attn_func
+
+
+# Import time for benchmarking
+import time
+
 with open(sys.argv[0]) as f:
     code = f.read()
 
@@ -58,9 +64,19 @@ def rmsnorm(x0, eps=1e-6):
 
 
 class CausalSelfAttention(nn.Module):
+    """Causal self-attention with optional Query-Key normalization.
+    
+    Supports standard attention or Query-Key normalized attention based on
+    config.qk_norm flag. QK normalization is applied before rotary embedding
+    to improve attention stability and training dynamics.
+    
+    The normalization is applied to both query and key matrices using RMS
+    normalization before rotary positional embeddings are applied.
+    """
 
     def __init__(self, config):
         super().__init__()
+        self.config = config  # Store config reference for conditional logic
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
@@ -72,26 +88,205 @@ class CausalSelfAttention(nn.Module):
         self.rotary = Rotary(self.head_dim)
 
     def forward(self, x):
-        B, T, C = (
-            x.size()
-        )  # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, self.head_dim)
         q = q.view(B, T, self.n_head, self.head_dim)
         v = v.view(B, T, self.n_head, self.head_dim)
+        
+        # Apply QK normalization before rotary embedding if enabled
+        if self.config.qk_norm:
+            q = rmsnorm(q, eps=1e-6)
+            k = rmsnorm(k, eps=1e-6)
+        
         cos, sin = self.rotary(q)
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         y = F.scaled_dot_product_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
         )
-        y = (
-            y.transpose(1, 2).contiguous().view(B, T, C)
-        )  # re-assemble all head outputs side by side
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         # output projection
         y = self.c_proj(y)
+        return y
+
+
+class FlashCausalSelfAttention(nn.Module):
+    """FlashAttention-2 based causal self-attention with optional Query-Key normalization.
+    
+    Uses FlashAttention-2 for optimized attention computation with better parallelism
+    and reduced memory usage. Supports post_norm and qk_norm configurations.
+    
+    Args:
+        config: Model configuration containing attention parameters
+        post_norm: If True, apply layer normalization after attention
+        qk_norm: If True, apply Query-Key normalization before rotary embedding
+    """
+
+    def __init__(self, config, post_norm=False, qk_norm=False):
+        super().__init__()
+        self.config = config
+        self.post_norm = post_norm
+        self.qk_norm = qk_norm
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0
+        
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
+        # output projection
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.rotary = Rotary(self.head_dim)
+        
+        # Post-normalization layer if enabled
+        if self.post_norm:
+            self.ln = nn.LayerNorm(self.n_embd)
+
+    def forward(self, x, attention_mask=None):
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
+        
+        # calculate query, key, values for all heads in batch
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        
+        # Reshape for multi-head attention
+        q = q.view(B, T, self.n_head, self.head_dim)
+        k = k.view(B, T, self.n_head, self.head_dim)
+        v = v.view(B, T, self.n_head, self.head_dim)
+        
+        # Apply QK normalization before rotary embedding if enabled
+        if self.qk_norm:
+            q = rmsnorm(q, eps=1e-6)
+            k = rmsnorm(k, eps=1e-6)
+        
+        # Apply rotary position embeddings
+        cos, sin = self.rotary(q)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        
+        # FlashAttention expects (batch, seqlen, nheads, headdim)
+        # and returns (batch, seqlen, nheads, headdim)
+        y = flash_attn_func(
+            q, k, v,
+            dropout_p=0.0,
+            causal=True,
+            softmax_scale=1.0 / math.sqrt(self.head_dim)
+        )
+        # Reshape back to (B, T, C)
+        y = y.contiguous().view(B, T, C)
+        
+        # Output projection
+        y = self.c_proj(y)
+        
+        # Apply post-normalization if enabled
+        if self.post_norm:
+            y = self.ln(y)
+        
+        return y
+
+
+class MultiHeadLatentAttention(nn.Module):
+    """Multi-Head Latent Attention for reduced complexity attention computation.
+    
+    Implements attention in a reduced latent space to achieve O(n×d) complexity
+    instead of O(n²) where d << n. Supports post_norm, qk_norm, and FlashAttention.
+    
+    Args:
+        config: Model configuration containing attention parameters
+        n_latent: Dimension of latent space (if None, uses n_embd)
+        post_norm: If True, apply layer normalization after attention
+        qk_norm: If True, apply Query-Key normalization before rotary embedding
+        use_flash: If True, use FlashAttention for attention computation
+    """
+
+    def __init__(self, config, n_latent=None, post_norm=False, qk_norm=False, use_flash=False):
+        super().__init__()
+        self.config = config
+        self.post_norm = post_norm
+        self.qk_norm = qk_norm
+        self.use_flash = use_flash
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        self.n_latent = n_latent or self.n_embd
+        assert self.n_embd % self.n_head == 0
+        
+        # Latent projection layers
+        self.latent_proj = nn.Linear(self.n_embd, self.n_latent, bias=False)
+        self.latent_proj_back = nn.Linear(self.n_latent, self.n_embd, bias=False)
+        
+        # Attention projections in latent space
+        self.latent_head_dim = self.n_latent // self.n_head
+        assert self.n_latent % self.n_head == 0
+        
+        # key, query, value projections in latent space
+        self.c_attn = nn.Linear(self.n_latent, 3 * self.n_latent, bias=False)
+        # output projection
+        self.c_proj = nn.Linear(self.n_latent, self.n_latent, bias=False)
+        self.rotary = Rotary(self.latent_head_dim)
+        
+        # Post-normalization layer if enabled
+        if self.post_norm:
+            self.ln = nn.LayerNorm(self.n_embd)
+
+    def forward(self, x, attention_mask=None):
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
+        
+        # Project to latent space
+        x_latent = self.latent_proj(x)  # (B, T, n_latent)
+        
+        # calculate query, key, values in latent space
+        qkv = self.c_attn(x_latent)
+        q, k, v = qkv.split(self.n_latent, dim=2)
+        
+        # Reshape for multi-head attention in latent space
+        q = q.view(B, T, self.n_head, self.latent_head_dim)
+        k = k.view(B, T, self.n_head, self.latent_head_dim)
+        v = v.view(B, T, self.n_head, self.latent_head_dim)
+        
+        # Apply QK normalization before rotary embedding if enabled
+        if self.qk_norm:
+            q = rmsnorm(q, eps=1e-6)
+            k = rmsnorm(k, eps=1e-6)
+        
+        # Apply rotary position embeddings in latent space
+        cos, sin = self.rotary(q)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        
+        # Compute attention in latent space
+        if self.use_flash:
+            # Use FlashAttention-2 for attention computation
+            # FlashAttention expects (batch, seqlen, nheads, headdim)
+            y = flash_attn_func(
+                q, k, v,
+                dropout_p=0.0,
+                causal=True,
+                softmax_scale=1.0 / math.sqrt(self.latent_head_dim)
+            )
+            # y is already (B, T, n_head, latent_head_dim)
+            y = y.contiguous().view(B, T, self.n_latent)
+        else:
+            # Use standard PyTorch scaled dot product attention
+            y = F.scaled_dot_product_attention(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), 
+                is_causal=True
+            )
+            y = y.transpose(1, 2).contiguous().view(B, T, self.n_latent)
+        
+        # Output projection in latent space
+        y = self.c_proj(y)
+        
+        # Project back to original space
+        y = self.latent_proj_back(y)  # (B, T, n_embd)
+        
+        # Apply post-normalization if enabled
+        if self.post_norm:
+            y = self.ln(y)
+        
         return y
 
 
@@ -110,17 +305,40 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    """Transformer block with conditional hybrid pre/post normalization.
+    """Transformer block with conditional hybrid pre/post normalization and attention options.
     
     Supports pre-norm only (GPT-2 style) or hybrid pre/post-norm architectures
     based on config.post_norm flag. Hybrid mode applies both input and output
     normalization for enhanced training stability.
+    
+    Supports Multi-Head Latent Attention and FlashAttention for improved performance.
     """
 
     def __init__(self, config):
         super().__init__()
         self.config = config  # Store config reference for conditional logic
-        self.attn = CausalSelfAttention(config)
+        
+        # Initialize attention mechanism based on configuration
+        if config.use_latent_attention:
+            # Use Multi-Head Latent Attention (with optional FlashAttention)
+            self.attn = MultiHeadLatentAttention(
+                config,
+                n_latent=config.n_latent,
+                post_norm=config.post_norm,
+                qk_norm=config.qk_norm,
+                use_flash=config.use_flash_attention
+            )
+        elif config.use_flash_attention:
+            # Use FlashAttention without latent projection
+            self.attn = FlashCausalSelfAttention(
+                config,
+                post_norm=config.post_norm,
+                qk_norm=config.qk_norm
+            )
+        else:
+            # Use standard CausalSelfAttention
+            self.attn = CausalSelfAttention(config)
+        
         self.mlp = MLP(config)
         self.attn_scale = 1 / math.sqrt(2 * config.n_layer)
 
@@ -147,12 +365,23 @@ class GPTConfig:
     Args:
         post_norm: If True, use hybrid pre/post-normalization (OLMo 2 style + input norm).
                   If False, use pre-normalization only (GPT-2 style).
+        qk_norm: If True, apply Query-Key normalization before rotary embedding.
+                If False, use standard attention without QK normalization.
+        use_flash_attention: If True, use FlashAttention for attention computation.
+                            If False, use standard scaled_dot_product_attention.
+        use_latent_attention: If True, use Multi-Head Latent Attention for reduced complexity.
+                             If False, use standard attention mechanism.
+        n_latent: Dimension of latent space for latent attention.
     """
     vocab_size: int = 50257
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    post_norm: bool = False  # New parameter for hybrid normalization
+    post_norm: bool = False  # Hybrid pre/post-normalization
+    qk_norm: bool = False    # Query-Key normalization
+    use_flash_attention: bool = False  # Use FlashAttention for attention computation
+    use_latent_attention: bool = False  # Latent attention for reduced complexity
+    n_latent: int = 384  # Latent space dimension
 
 
 class GPT(nn.Module):
@@ -207,6 +436,102 @@ class GPT(nn.Module):
             self.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=betas
         )
         return optimizer
+
+
+# -----------------------------------------------------------------------------
+# Performance Benchmarking Functions
+
+def benchmark_attention_mechanisms(model, input_data, mechanisms=['standard', 'flash', 'mla', 'mla_flash']):
+    """Benchmark different attention mechanisms for performance comparison.
+    
+    Args:
+        model: The GPT model to benchmark
+        input_data: Input tensor for benchmarking
+        mechanisms: List of attention mechanisms to compare
+            - 'standard': Standard CausalSelfAttention
+            - 'flash': FlashAttention without latent projection
+            - 'mla': Multi-Head Latent Attention without FlashAttention
+            - 'mla_flash': Multi-Head Latent Attention with FlashAttention
+        
+    Returns:
+        dict: Performance metrics for each mechanism
+    """
+    results = {}
+    device = input_data.device
+    
+    for mechanism in mechanisms:
+        if mechanism == 'standard':
+            # Use standard CausalSelfAttention
+            config = model.config
+            config.use_flash_attention = False
+            config.use_latent_attention = False
+        elif mechanism == 'flash':
+            # Use FlashAttention without latent projection
+            config = model.config
+            config.use_flash_attention = True
+            config.use_latent_attention = False
+        elif mechanism == 'mla':
+            # Use Multi-Head Latent Attention without FlashAttention
+            config = model.config
+            config.use_flash_attention = False
+            config.use_latent_attention = True
+        elif mechanism == 'mla_flash':
+            # Use Multi-Head Latent Attention with FlashAttention
+            config = model.config
+            config.use_flash_attention = True
+            config.use_latent_attention = True
+        
+        # Warmup
+        with torch.no_grad():
+            for _ in range(5):
+                _ = model(input_data, return_logits=False)
+        
+        # Benchmark
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+        
+        with torch.no_grad():
+            for _ in range(10):
+                _ = model(input_data, return_logits=False)
+        
+        torch.cuda.synchronize()
+        end_time = time.perf_counter()
+        
+        avg_time = (end_time - start_time) / 10
+        results[mechanism] = {
+            'avg_time_ms': avg_time * 1000,
+            'throughput_tokens_per_sec': input_data.numel() / avg_time
+        }
+    
+    return results
+
+
+def measure_memory_usage(model, input_data):
+    """Measure memory usage for different model configurations.
+    
+    Args:
+        model: The GPT model to measure
+        input_data: Input tensor for measurement
+        
+    Returns:
+        dict: Memory usage metrics
+    """
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    
+    # Measure memory usage during forward pass
+    with torch.no_grad():
+        _ = model(input_data, return_logits=False)
+    
+    peak_memory = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+    current_memory = torch.cuda.memory_allocated() / 1024 / 1024   # MB
+    
+    return {
+        'peak_memory_mb': peak_memory,
+        'current_memory_mb': current_memory,
+        'input_tokens': input_data.numel(),
+        'memory_per_token_mb': peak_memory / input_data.numel()
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -340,7 +665,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="d12",
-        help="d12|d12_post_norm|d24|d36|d48",
+        help="d12|d12_post_norm|d12_post_norm_qk_norm|d24|d36|d48",
     )
     # token layout for each step of the optimization
     parser.add_argument(
@@ -407,7 +732,7 @@ if __name__ == "__main__":
 
     # args error checking and convenience variables
     B, T = args.batch_size, args.sequence_length
-    assert args.model in {"d12", "d12_post_norm", "d24", "d36", "d48"}
+    assert args.model in {"d12", "d12_post_norm", "d12_post_norm_qk_norm", "d24", "d36", "d48"}
     # set up DDP (distributed data parallel). torchrun sets this env variable
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
     assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
@@ -457,17 +782,33 @@ if __name__ == "__main__":
 
     # init the model from scratch
     num_vocab = 50257
-    model_config = {
+    
+    # Get base model configuration
+    base_configs = {
         "d12": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768
         ),  # 124M GPT-2
         "d12_post_norm": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, post_norm=True
         ),  # 124M GPT-2 with hybrid pre/post-normalization
+        "d12_post_norm_qk_norm": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, post_norm=True, qk_norm=True
+        ),  # 124M GPT-2 with hybrid normalization + QK normalization
+        "d12_flash": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, 
+            post_norm=True, qk_norm=True, use_flash_attention=True
+        ),  # 124M GPT-2 with Flash Attention + post-norm + QK norm
+        "d12_mla_flash": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
+            post_norm=True, qk_norm=True, use_flash_attention=True, use_latent_attention=True, n_latent=384
+        ),  # 124M GPT-2 with MLA + Flash Attention + post-norm + QK norm
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),
         "d48": GPTConfig(vocab_size=num_vocab, n_layer=48, n_head=25, n_embd=1600),
-    }[args.model]
+    }
+    
+    model_config = base_configs[args.model]
+    
     model = GPT(model_config)
     model = model.train().cuda()
     if hasattr(config, "coordinate_descent_tuning"):

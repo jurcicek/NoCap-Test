@@ -5,31 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.3] - 2025-01-29
+## [1.0.3] - 2025-09-30
 
 ### Added
-- **FlashMLA Implementation**: Implemented FlashAttention-2 with Multi-Head Latent Attention for improved performance and efficiency
-- **FlashCausalSelfAttention Class**: New attention mechanism using FlashAttention-2 with optional post_norm and qk_norm support
-- **MultiHeadLatentAttention Class**: Reduced complexity attention through latent space projection achieving O(n×d) complexity
-- **Combined FlashMLA Class**: Integration of FlashAttention-2 with Multi-Head Latent Attention for optimal performance
-- **FlashMLA Configuration**: Added `use_flash_mla`, `use_latent_attention`, and `latent_dim` parameters to GPTConfig
-- **New Model Configuration**: Added `d12_flash_mla` model variant with FlashMLA attention mechanism enabled
-- **Command Line Support**: Extended CLI with `--use-flash-mla`, `--use-latent-attention`, and `--latent-dim` options
-- **Performance Benchmarking**: Added benchmarking tools to measure and compare different attention mechanisms
-- **Memory Usage Tracking**: Implemented memory usage measurement for different model configurations
+- **FlashCausalSelfAttention Class**: Implemented FlashAttention-2 based attention mechanism with optional post_norm and qk_norm support for optimized computation
+- **MultiHeadLatentAttention Class**: Added reduced complexity attention through latent space projection achieving O(n×d) complexity with optional FlashAttention support
+- **Flash-attn Integration**: Integrated `flash-attn` library for 2-4x faster attention computation with better parallelism
+- **FlashAttention Configuration**: Added `use_flash_attention` parameter to GPTConfig for enabling FlashAttention-2 based attention
+- **Latent Attention Configuration**: Added `use_latent_attention` and `n_latent` parameters to GPTConfig for reduced complexity attention
+- **Enhanced Documentation**: Added comprehensive docstrings to CausalSelfAttention, FlashCausalSelfAttention, and MultiHeadLatentAttention classes
+- **Time Module Import**: Added time import for performance benchmarking capabilities
 
 ### Changed
-- **Block Architecture**: Modified Block class to support FlashMLA attention mechanism with configuration-driven selection
-- **Model Configurations**: Enhanced GPTConfig with FlashMLA-specific parameters for flexible attention mechanism selection
-- **Training Scripts**: Updated run_mod_v01.sh to use d12_flash_mla model configuration by default
+- **Block Architecture**: Modified Block class to support FlashAttention and Multi-Head Latent Attention with configuration-driven selection
+- **CausalSelfAttention Enhancement**: Enhanced CausalSelfAttention with proper QK normalization support and improved documentation
+- **Model Configurations**: Enhanced GPTConfig with FlashAttention and latent attention parameters for flexible attention mechanism selection
+- **Code Formatting**: Improved code formatting and comments for better readability
 
 ### Enhanced
 - **Attention Performance**: FlashAttention-2 provides 2-4x faster attention computation with better parallelism
-- **Memory Efficiency**: Reduced memory usage for attention operations, especially beneficial for long sequences
+- **Memory Efficiency**: Reduced memory usage for attention operations, especially beneficial for long sequences  
 - **Scalability**: Multi-Head Latent Attention enables better performance on very long sequences through reduced complexity
-- **Backward Compatibility**: All existing model configurations remain unchanged, FlashMLA is opt-in
+- **Composability**: FlashAttention can be combined with latent attention for optimal performance on different sequence lengths
+- **Backward Compatibility**: All existing model configurations remain unchanged, FlashAttention and latent attention are opt-in
 
-## [1.0.2] - 2025-01-29
+## [1.0.2] - 2025-09-29
 
 ### Added
 - **Query-Key Normalization**: Implemented QK normalization in attention mechanism following OLMo 2 paper approach
@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Attention Stability**: QK normalization improves attention weight distributions and training dynamics
 - **Composability**: QK normalization can be combined with post-normalization for enhanced training stability
 
-## [1.0.1] - 2025-01-29
+## [1.0.1] - 2025-09-29
 
 ### Added
 - **Hybrid Pre/Post-Normalization**: Implemented hybrid normalization architecture in GPT-2 model following OLMo 2 paper approach
