@@ -729,6 +729,12 @@ if __name__ == "__main__":
         action="store_true",
         help="log to wandb",
     )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default="",
+        help="path to checkpoint to resume training from",
+    )
     args = parser.parse_args()
 
     # args error checking and convenience variables
@@ -839,6 +845,43 @@ if __name__ == "__main__":
         device_type=device,
     )
 
+    # checkpoint resumption
+    start_step = 0
+    run_id = str(uuid.uuid4())
+    
+    if args.resume_from:
+        print0(f"Resuming training from checkpoint: {args.resume_from}")
+        checkpoint = torch.load(args.resume_from, map_location=device)
+        
+        # Load model state
+        raw_model.load_state_dict(checkpoint["model"])
+        print0("✓ Loaded model state")
+        
+        # Load optimizer state
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        print0("✓ Loaded optimizer state")
+        
+        # Resume from the next step after the checkpoint
+        start_step = checkpoint.get("step", 0) + 1
+        print0(f"✓ Resuming from step {start_step}")
+        
+        # Use the same run_id to continue logging to the same directory
+        if "run_id" in checkpoint:
+            run_id = checkpoint["run_id"]
+            print0(f"✓ Continuing run_id: {run_id}")
+        
+        # Verify that critical training parameters match
+        checkpoint_args = checkpoint.get("args", {})
+        critical_params = ["model", "batch_size", "sequence_length", "grad_accumulation_steps"]
+        for param in critical_params:
+            checkpoint_val = checkpoint_args.get(param)
+            current_val = getattr(args, param)
+            if checkpoint_val is not None and checkpoint_val != current_val:
+                print0(f"WARNING: {param} mismatch - checkpoint: {checkpoint_val}, current: {current_val}")
+        
+        del checkpoint  # Free memory
+        torch.cuda.empty_cache()
+
     # learning rate decay scheduler (linear warmup and warmdown)
     def get_lr(it):
         assert it <= args.num_iterations
@@ -853,16 +896,18 @@ if __name__ == "__main__":
             decay_ratio = (args.num_iterations - it) / args.warmdown_iters
             return args.learning_rate * decay_ratio
 
-    run_id = str(uuid.uuid4())
-
     # create the logging directory if it does not exist
     logfile = None
     if master_process and args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
         logfile = os.path.join(args.output_dir, "%s.log" % run_id)
-        # create the log file "main.log" inside it, and wipe it clean
-        with open(logfile, "w") as f:
-            pass
+        # create the log file or append if resuming
+        if not args.resume_from:
+            # wipe it clean for new runs
+            with open(logfile, "w") as f:
+                pass
+        else:
+            print0(f"Appending to existing log file: {logfile}")
 
     training_time_ms = 0.0
     # start the clock
@@ -870,7 +915,7 @@ if __name__ == "__main__":
     t0 = time.perf_counter()
 
     # begin training
-    for step in range(args.num_iterations + 1):
+    for step in range(start_step, args.num_iterations + 1):
         last_step = step == args.num_iterations
 
         # once in a while evaluate the validation dataset
@@ -961,7 +1006,14 @@ if __name__ == "__main__":
                     f.write("s:%d trn:%f\n" % (step, lossf))
 
         if master_process and (step + 1) % args.save_every == 0:
-            log = dict(model=raw_model.state_dict(), code=code, args=args.__dict__)
+            log = dict(
+                model=raw_model.state_dict(),
+                optimizer=optimizer.state_dict(),
+                step=step,
+                code=code,
+                args=args.__dict__,
+                run_id=run_id,
+            )
             os.makedirs("logs/%s" % run_id, exist_ok=True)
             torch.save(log, "logs/%s/model_step%06d.pt" % (run_id, step))
 
@@ -972,7 +1024,14 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
 
     if master_process:
-        log = dict(model=raw_model.state_dict(), code=code, args=args.__dict__)
+        log = dict(
+            model=raw_model.state_dict(),
+            optimizer=optimizer.state_dict(),
+            step=args.num_iterations,
+            code=code,
+            args=args.__dict__,
+            run_id=run_id,
+        )
         os.makedirs("logs/%s" % run_id, exist_ok=True)
         torch.save(log, "logs/%s/final.pt" % run_id)
 

@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.1.0] - 2025-10-01
+
+### Added
+- **Checkpoint Resumption**: Training can now be resumed from any saved checkpoint using `--resume_from` argument
+- **Enhanced Checkpoint Data**: Checkpoints now include optimizer state, step number, and run_id for complete state restoration
+- **Resume Documentation**: Created comprehensive CHECKPOINT_RESUME_GUIDE.md with usage examples and troubleshooting
+
+### Changed
+- **Checkpoint Format**: Updated checkpoint saving to include optimizer state_dict, step number, and run_id
+- **Training Loop**: Modified to support starting from arbitrary step numbers when resuming
+- **Log File Handling**: Log files are now appended to (rather than overwritten) when resuming training
+
+### Enhanced
+- **Training Continuity**: Resume training from interruptions without losing progress
+- **State Preservation**: Optimizer momentum and Adam states are preserved across training sessions
+- **Run Tracking**: Resumed runs maintain the same run_id for consistent logging and checkpoint organization
+
+### Implementation Details
+- Added `--resume_from` CLI argument to specify checkpoint path
+- Added parameter validation to warn about mismatches between checkpoint and current configuration
+- Training starts from `checkpoint_step + 1` when resuming
+- Log files are preserved and appended to when resuming
+
 ## [1.0.3] - 2025-09-30
 
 ### Added
