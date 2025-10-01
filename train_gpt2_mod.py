@@ -953,9 +953,12 @@ if __name__ == "__main__":
             f"step:{step}/{args.num_iterations} | loss {lossf:.6f} | train_time:{approx_training_time_ms/1000:.2f}s | step_avg:{approx_training_time_ms/(step+1):.2f}ms"
         )
         # log to logile
-        if master_process and logfile is not None:
-            with open(logfile, "a") as f:
-                f.write("s:%d trn:%f\n" % (step, lossf))
+        if master_process:
+            if args.log_wandb:
+                wandb.log({"train_loss": lossf}, step=step * tokens_per_iter)
+            if logfile is not None:
+                with open(logfile, "a") as f:
+                    f.write("s:%d trn:%f\n" % (step, lossf))
 
         if master_process and (step + 1) % args.save_every == 0:
             log = dict(model=raw_model.state_dict(), code=code, args=args.__dict__)

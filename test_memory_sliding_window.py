@@ -20,6 +20,9 @@ from train_gpt2_mod import (
     GPTConfig, GPT
 )
 
+# set up a context manager following the desired dtype and device
+ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+
 
 def measure_attention_memory(attention_type='standard', batch_size=4, seq_len=1024):
     """Measure memory usage for different attention mechanisms."""
@@ -45,7 +48,7 @@ def measure_attention_memory(attention_type='standard', batch_size=4, seq_len=10
     print(f"Creating model for {attention_type.upper()} attention (B={batch_size}, T={seq_len})")
     print(f"{'='*60}")
     # Create model
-    model = GPT(config).cuda().train()
+    model = GPT(config).cuda().to(dtype=torch.bfloat16).train()
     
     # Create input
     x = torch.randint(0, 50257, (batch_size, seq_len), device='cuda')
@@ -60,7 +63,7 @@ def measure_attention_memory(attention_type='standard', batch_size=4, seq_len=10
     print(f"Memory before forward: {mem_before:.2f} MB")
     
     # Forward pass
-    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+    with ctx:
         logits, loss = model(x, y, return_logits=True)
     
     mem_after_fwd = torch.cuda.memory_allocated() / 1024 / 1024
@@ -205,7 +208,7 @@ def detailed_layer_analysis():
         post_norm=True, qk_norm=True
     )
     
-    model = GPT(config).cuda().train()
+    model = GPT(config).cuda().to(dtype=torch.bfloat16).train()
     x_input = torch.randint(0, 50257, (1, 1024), device='cuda')
     
     # Hook to measure memory per layer
@@ -224,7 +227,7 @@ def detailed_layer_analysis():
             handles.append(h)
     
     print("\nMemory during forward pass:")
-    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+    with ctx:
         _ = model(x_input, return_logits=False)
     
     # Cleanup
@@ -256,11 +259,11 @@ def test_attention_performance():
             attention_type=attn_type, window_size=64 if attn_type == 'sliding_window' else None
         )
         
-        model = GPT(config).cuda().eval()
+        model = GPT(config).cuda().to(dtype=torch.bfloat16).eval()
         x = torch.randint(0, 50257, (batch_size, seq_len), device='cuda')
         
         # Warmup
-        with torch.no_grad():
+        with torch.no_grad(), ctx:
             for _ in range(3):
                 _ = model(x, return_logits=False)
         
@@ -272,7 +275,7 @@ def test_attention_performance():
             torch.cuda.synchronize()
             start = time.time()
             
-            with torch.no_grad():
+            with torch.no_grad(), ctx:
                 _ = model(x, return_logits=False)
             
             torch.cuda.synchronize()
