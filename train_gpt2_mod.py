@@ -819,7 +819,7 @@ if __name__ == "__main__":
     model_config = base_configs[args.model]
     
     model = GPT(model_config)
-    model = model.train().cuda()
+    model = model.train().cuda().to(dtype=torch.bfloat16)
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True  # suggested by @Chillee
     print0("compiling the model...")
