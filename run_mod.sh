@@ -14,3 +14,5 @@ torchrun --standalone --nproc_per_node=1 train_gpt2_mod.py \
   --warmup_iters 256 \
   --warmdown_iters 1024 \
   --log_wandb
+
+  # --model d12_post_norm_qk_norm \

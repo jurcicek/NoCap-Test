@@ -1,5 +1,7 @@
 ---
 description: Fix the cause
-alwaysApply: false
+globs:
+alwaysApply: true
 ---
+
 Important: try to fix things at the cause, not the symptom.

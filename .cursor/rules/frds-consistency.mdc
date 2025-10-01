@@ -4,5 +4,4 @@ globs:
 alwaysApply: true
 ---
 
-When working on FRDs, and tasks for FRDs, be consistent. Both FRDs and tasks structure should be similar and should not not deviate at random. 
-
+When working on Functional Requirements Documents (FRDs) and tasks related to them, it is crucial to maintain consistency. Both the structure of the FRDs themselves and the tasks derived from them should be similar and adhere to a predefined standard, avoiding arbitrary deviations.

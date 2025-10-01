@@ -14,9 +14,57 @@ import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+import flash_attn
 
-# Import time for benchmarking
 import time
+
+
+# Global cache for sliding window attention masks
+_sliding_window_mask_cache = {}
+_MAX_CACHE_SIZE = 10
+
+def create_sliding_window_attn_mask(T, window_size, device):
+    """Create a sliding window attention mask for scaled_dot_product_attention.
+    
+    Args:
+        T: Sequence length
+        window_size: Window size for sliding window attention
+        device: Device to create the mask on
+        
+    Returns:
+        Attention mask tensor of shape (T, T) where True means attend, False means mask out
+    """
+    # Check cache first
+    cache_key = (T, window_size, str(device))
+    if cache_key in _sliding_window_mask_cache:
+        return _sliding_window_mask_cache[cache_key]
+    
+    # Create position indices
+    q_pos = torch.arange(T, device=device).unsqueeze(1)  # (T, 1)
+    k_pos = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
+    
+    # Create sliding window mask: within window and causal
+    within_window = torch.abs(q_pos - k_pos) <= window_size
+    causal_mask = k_pos <= q_pos  # causal: can only see previous tokens
+    
+    # Combine: attend if within window AND causal
+    attn_mask = within_window & causal_mask
+    
+    # Cache the mask (with size limit)
+    if len(_sliding_window_mask_cache) < _MAX_CACHE_SIZE:
+        _sliding_window_mask_cache[cache_key] = attn_mask
+    
+    return attn_mask
+
+def clear_sliding_window_mask_cache():
+    """Clear the sliding window attention mask cache to free memory."""
+    global _sliding_window_mask_cache
+    _sliding_window_mask_cache.clear()
+
+def clear_all_attention_caches():
+    """Clear all attention mask caches to free memory."""
+    clear_sliding_window_mask_cache()
+    # Clear any other attention caches here if needed
 
 with open(sys.argv[0]) as f:
     code = f.read()
@@ -186,16 +234,12 @@ class MultiHeadLatentAttention(nn.Module):
 
 
 class SlidingWindowAttention(nn.Module):
-    """Efficient sliding window attention implementation.
+    """Sliding window attention implementation using FlashAttention-2.
     
-    Uses vectorized operations to compute attention over a sliding window of tokens,
-    reducing computational complexity from O(n²) to O(n×w) where w is the window size.
-    
-    Supports:
-    - Configurable window size
-    - Causal masking (can only see previous tokens)
-    - Optional Query-Key normalization
-    - Rotary positional embeddings
+    Features:
+    - FlashAttention-2 with sliding window support (assumes always available)
+    - Fixed window size for consistent performance
+    - Optimized memory usage
     """
     
     def __init__(self, config):
@@ -205,7 +249,7 @@ class SlidingWindowAttention(nn.Module):
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
         self.window_size = getattr(config, 'window_size', 64)
-        
+                
         assert self.n_embd % self.n_head == 0
         
         # Key, query, value projections
@@ -238,61 +282,36 @@ class SlidingWindowAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         
-        # Efficient sliding window attention
-        y = self._sliding_window_attention(q, k, v)
+        # Use FlashAttention sliding window with fixed window size
+        if self.training and getattr(self.config, 'gradient_checkpointing', False):
+            y = torch.utils.checkpoint.checkpoint(
+                self._flash_attention_sliding_window, q, k, v, self.window_size, use_reentrant=False
+            )
+        else:
+            y = self._flash_attention_sliding_window(q, k, v, self.window_size)
         
         # Output projection
         y = self.c_proj(y)
         return y
     
-    def _sliding_window_attention(self, q, k, v):
-        """Vectorized sliding window attention computation."""
-        B, T, H, D = q.shape
-        window_size = min(self.window_size, T)  # Don't exceed sequence length
+    def _flash_attention_sliding_window(self, q, k, v, window_size):
+        """Use FlashAttention-2 with sliding window support.
+        Assumes FlashAttention-2 is always available.
+        """
+        # Ensure inputs are in the correct dtype for FlashAttention
+        q_fa = q.transpose(1, 2).half()  # (B, H, T, D) - FlashAttention requires fp16/bf16
+        k_fa = k.transpose(1, 2).half()
+        v_fa = v.transpose(1, 2).half()
         
-        # Transpose for attention: (B, H, T, D)
-        q = q.transpose(1, 2)  # (B, H, T, D)
-        k = k.transpose(1, 2)  # (B, H, T, D)
-        v = v.transpose(1, 2)  # (B, H, T, D)
+        # FlashAttention-2 with sliding window
+        y = flash_attn.flash_attn_func(
+            q_fa, k_fa, v_fa,
+            causal=True,
+            window_size=(window_size, 0)  # Sliding window support
+        )
         
-        # Create sliding windows using unfold
-        # Pad k and v to handle the sliding window
-        pad_size = window_size - 1
-        k_padded = F.pad(k, (0, 0, pad_size, 0))  # Pad at the beginning
-        v_padded = F.pad(v, (0, 0, pad_size, 0))
-        
-        # Create sliding windows: (B, H, T, window_size, D)
-        k_windows = k_padded.unfold(2, window_size, 1)  # (B, H, T, window_size, D)
-        v_windows = v_padded.unfold(2, window_size, 1)  # (B, H, T, window_size, D)
-        
-        # Compute attention scores
-        # q: (B, H, T, D), k_windows: (B, H, T, window_size, D)
-        scores = torch.matmul(q.unsqueeze(3), k_windows.transpose(-2, -1))  # (B, H, T, 1, window_size)
-        scores = scores.squeeze(3) / math.sqrt(D)  # (B, H, T, window_size)
-        
-        # Apply causal mask by masking out future positions within each window
-        # For position i, we can only attend to positions [i-window_size+1, i]
-        causal_mask = torch.zeros(B, H, T, window_size, device=q.device, dtype=scores.dtype)
-        for i in range(T):
-            # For each position i, mask out positions that are beyond i
-            for j in range(window_size):
-                if j > i:  # This would be a future position
-                    causal_mask[:, :, i, j] = float('-inf')
-        
-        scores = scores + causal_mask
-        
-        # Softmax over the window dimension
-        attn_weights = F.softmax(scores, dim=-1)  # (B, H, T, window_size)
-        
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights.unsqueeze(3), v_windows)  # (B, H, T, 1, D)
-        attn_output = attn_output.squeeze(3)  # (B, H, T, D)
-        
-        # Transpose back and reshape
-        attn_output = attn_output.transpose(1, 2).contiguous()  # (B, T, H, D)
-        attn_output = attn_output.view(B, T, self.n_embd)
-        
-        return attn_output
+        # Convert back to original dtype and shape
+        return y.transpose(1, 2).view(q.shape[0], q.shape[1], self.n_embd).to(q.dtype)
 
 
 class MLP(nn.Module):
@@ -310,17 +329,6 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    """Transformer block with conditional hybrid pre/post normalization and multiple attention options.
-    
-    Supports pre-norm only (GPT-2 style) or hybrid pre/post-norm architectures
-    based on config.post_norm flag. Hybrid mode applies both input and output
-    normalization for enhanced training stability.
-    
-    Supports multiple attention mechanisms:
-    - Standard CausalSelfAttention
-    - Multi-Head Latent Attention for reduced complexity
-    - SlidingWindowAttention for efficient long sequences
-    """
 
     def __init__(self, config):
         super().__init__()
@@ -331,7 +339,7 @@ class Block(nn.Module):
         
         if attention_type == 'sliding_window':
             self.attn = SlidingWindowAttention(config)
-        elif config.use_latent_attention or attention_type == 'latent':
+        elif attention_type == 'latent':
             self.attn = MultiHeadLatentAttention(config)
         else:  # standard or default
             self.attn = CausalSelfAttention(config)
@@ -364,12 +372,11 @@ class GPTConfig:
                    If False, use pre-normalization only (GPT-2 style).
         qk_norm: If True, apply Query-Key normalization before rotary embedding.
                  If False, use standard attention without QK normalization.
-        use_latent_attention: If True, use Multi-Head Latent Attention for reduced complexity.
-                              If False, use standard attention mechanism.
         n_latent: Dimension of latent space for latent attention.
         attention_type: Type of attention mechanism to use.
                         Options: 'standard', 'latent', 'sliding_window'
         window_size: Window size for sliding window attention (only used if attention_type='sliding_window').
+        gradient_checkpointing: If True, use gradient checkpointing for memory efficiency.
     """
     vocab_size: int = 50257
     n_layer: int = 12
@@ -377,10 +384,11 @@ class GPTConfig:
     n_embd: int = 768
     post_norm: bool = False  # Hybrid pre/post-normalization
     qk_norm: bool = False    # Query-Key normalization
-    use_latent_attention: bool = False  # Latent attention for reduced complexity
     n_latent: int = 384  # Latent space dimension
     attention_type: str = "standard"  # Attention mechanism type
     window_size: int = 64  # Window size for sliding window attention
+    # gradient_checkpointing: bool = False  # Gradient checkpointing for memory efficiency
+    gradient_checkpointing: bool = True  # Gradient checkpointing for memory efficiency
 
 
 class GPT(nn.Module):
@@ -407,9 +415,13 @@ class GPT(nn.Module):
         # forward the GPT model itself
         x = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
 
+        # print(f"torch.cuda.memory_allocated() / 1024 / 1024 = {torch.cuda.memory_allocated() / 1024 / 1024}")
         for block in self.transformer.h:
+            # print(f"torch.cuda.memory_allocated() / 1024 / 1024 = {torch.cuda.memory_allocated() / 1024 / 1024}")
             x = block(x)
         x = rmsnorm(x)
+
+        # print(f"torch.cuda.memory_allocated() / 1024 / 1024 = {torch.cuda.memory_allocated() / 1024 / 1024}")
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -435,6 +447,10 @@ class GPT(nn.Module):
             self.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=betas
         )
         return optimizer
+    
+    def clear_attention_caches(self):
+        """Clear all attention mask caches to free memory."""
+        clear_all_attention_caches()
 
 
 # -----------------------------------------------------------------------------
@@ -460,11 +476,11 @@ def benchmark_attention_mechanisms(model, input_data, mechanisms=['standard', 'm
         if mechanism == 'standard':
             # Use standard CausalSelfAttention
             config = model.config
-            config.use_latent_attention = False
+            config.attention_type = 'standard'
         elif mechanism == 'mla':
             # Use Multi-Head Latent Attention
             config = model.config
-            config.use_latent_attention = True
+            config.attention_type = 'latent'
         
         # Warmup
         with torch.no_grad():
@@ -784,15 +800,16 @@ if __name__ == "__main__":
         ),  # 124M GPT-2 with hybrid normalization + QK normalization
         "d12_mla": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=16, n_embd=1024,
-            post_norm=True, qk_norm=True, use_latent_attention=True, n_latent=256
+            post_norm=True, qk_norm=True, attention_type="latent", n_latent=256
         ),  # 124M GPT-2 with MLA + post-norm + QK norm
         "d12_window": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
-            post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=64
+            # vocab_size=num_vocab, n_layer=12, n_head=8, n_embd=512,
+            post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=32
         ),  # 124M GPT-2 with sliding window attention
         "d12_window_large": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
-            post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=128
+            post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=64
         ),  # 124M GPT-2 with large sliding window attention
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),

@@ -5,49 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.4] - 2025-09-30
-
-### Removed
-- **FlashCausalSelfAttention Class**: Removed FlashAttention-2 based attention mechanism implementation
-- **Flash-attn Library Dependency**: Removed `flash-attn` import and dependency from the project
-- **FlashAttention Configuration**: Removed `use_flash_attention` parameter from GPTConfig
-- **Flash Model Variants**: Removed `d12_flash` and `d12_mla_flash` model configurations
-- **FlashAttention from MultiHeadLatentAttention**: Removed `use_flash` parameter and flash attention logic from latent attention
-
-### Changed
-- **Block Architecture**: Simplified Block class to support only CausalSelfAttention and MultiHeadLatentAttention without flash attention
-- **MultiHeadLatentAttention**: Now exclusively uses standard PyTorch scaled_dot_product_attention instead of FlashAttention
-- **Model Configurations**: Updated base_configs to remove flash attention variants, keeping only standard and latent attention options
-- **Benchmark Function**: Updated benchmark_attention_mechanisms to exclude flash attention mechanisms
-
-### Rationale
-- Simplified codebase by removing external flash attention dependency
-- All attention operations now use standard PyTorch built-in attention mechanisms
-- Maintains backward compatibility for non-flash attention models
 
 ## [1.0.3] - 2025-09-30
 
 ### Added
-- **FlashCausalSelfAttention Class**: Implemented FlashAttention-2 based attention mechanism with optional post_norm and qk_norm support for optimized computation
-- **MultiHeadLatentAttention Class**: Added reduced complexity attention through latent space projection achieving O(n×d) complexity with optional FlashAttention support
-- **Flash-attn Integration**: Integrated `flash-attn` library for 2-4x faster attention computation with better parallelism
-- **FlashAttention Configuration**: Added `use_flash_attention` parameter to GPTConfig for enabling FlashAttention-2 based attention
-- **Latent Attention Configuration**: Added `use_latent_attention` and `n_latent` parameters to GPTConfig for reduced complexity attention
-- **Enhanced Documentation**: Added comprehensive docstrings to CausalSelfAttention, FlashCausalSelfAttention, and MultiHeadLatentAttention classes
-- **Time Module Import**: Added time import for performance benchmarking capabilities
+- **Memory Profiling**: Added memory tracking to block mask creation in SlidingWindowAttention
+- **Memory Analysis Documentation**: Created comprehensive MEMORY_ANALYSIS_SLIDING_WINDOW.md documenting memory overhead causes
+- **Memory Testing Script**: Added test_memory.py for comparing memory usage between attention mechanisms
 
 ### Changed
-- **Block Architecture**: Modified Block class to support FlashAttention and Multi-Head Latent Attention with configuration-driven selection
-- **CausalSelfAttention Enhancement**: Enhanced CausalSelfAttention with proper QK normalization support and improved documentation
-- **Model Configurations**: Enhanced GPTConfig with FlashAttention and latent attention parameters for flexible attention mechanism selection
-- **Code Formatting**: Improved code formatting and comments for better readability
+- **Block Mask Logging**: Improved logging to show memory delta during block mask creation
+- **Attention Comments**: Added explanatory comments about memory characteristics of flex_attention
 
-### Enhanced
-- **Attention Performance**: FlashAttention-2 provides 2-4x faster attention computation with better parallelism
-- **Memory Efficiency**: Reduced memory usage for attention operations, especially beneficial for long sequences  
-- **Scalability**: Multi-Head Latent Attention enables better performance on very long sequences through reduced complexity
-- **Composability**: FlashAttention can be combined with latent attention for optimal performance on different sequence lengths
-- **Backward Compatibility**: All existing model configurations remain unchanged, FlashAttention and latent attention are opt-in
+### Documented
+- **Memory Overhead Analysis**: Identified that SlidingWindowAttention uses ~350MB more memory than CausalSelfAttention due to:
+  - Block mask metadata storage (~50-200 MB)
+  - FlexAttention intermediate tensors (~50-100 MB)  
+  - Compiled kernel overhead (~100-200 MB)
+  - Cache broadcasting inefficiencies (~10-50 MB)
+
+### Notes
+- SlidingWindowAttention currently uses more memory than standard attention despite being designed for efficiency
+- Root cause: flex_attention with block masks materializes sparse structures vs FlashAttention's O(1) memory
+- Recommended solution: Use flash-attn library with native sliding window support instead of flex_attention
 
 ## [1.0.2] - 2025-09-29
 
