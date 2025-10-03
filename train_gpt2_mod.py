@@ -358,7 +358,25 @@ class Block(nn.Module):
             x = x + self.mlp(rmsnorm(x))
         return x
 
-
+class GatedEmbedding(nn.Module):
+    def __init__(self, vocab_size, embed_dim):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.gate = nn.Linear(embed_dim, embed_dim)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        # Get embeddings
+        emb = self.embedding(x)
+        
+        # Compute gate
+        gate_values = self.sigmoid(self.gate(emb))
+        
+        # Apply gating
+        gated_emb = gate_values * emb
+        
+        return gated_emb
+        
 # -----------------------------------------------------------------------------
 # The main GPT-2 model
 
@@ -377,6 +395,7 @@ class GPTConfig:
                         Options: 'standard', 'latent', 'sliding_window'
         window_size: Window size for sliding window attention (only used if attention_type='sliding_window').
         gradient_checkpointing: If True, use gradient checkpointing for memory efficiency.
+        use_gated_embedding: If True, use gated embeddings instead of standard embeddings.
     """
     vocab_size: int = 50257
     n_layer: int = 12
@@ -389,6 +408,7 @@ class GPTConfig:
     window_size: int = 64  # Window size for sliding window attention
     # gradient_checkpointing: bool = False  # Gradient checkpointing for memory efficiency
     gradient_checkpointing: bool = True  # Gradient checkpointing for memory efficiency
+    use_gated_embedding: bool = False  # Use gated embeddings
 
 
 class GPT(nn.Module):
@@ -397,16 +417,27 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
+        # Choose embedding type based on configuration
+        if config.use_gated_embedding:
+            embedding_layer = GatedEmbedding(config.vocab_size, config.n_embd)
+        else:
+            embedding_layer = nn.Embedding(config.vocab_size, config.n_embd)
+
         self.transformer = nn.ModuleDict(
             dict(
-                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wte=embedding_layer,
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = (
-            self.lm_head.weight
-        )  # https://paperswithcode.com/method/weight-tying
+        
+        # Tie weights for both embedding types
+        if config.use_gated_embedding:
+            self.transformer.wte.embedding.weight = self.lm_head.weight
+        else:
+            self.transformer.wte.weight = (
+                self.lm_head.weight
+            )  # https://paperswithcode.com/method/weight-tying
 
     def forward(self, idx, targets=None, return_logits=True):
         b, t = idx.size()
@@ -666,7 +697,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="d12",
-        help="d12|d12_post_norm|d12_post_norm_qk_norm|d12_mla|d12_window|d12_window_large|d24|d36|d48",
+        help="d12|d12_post_norm|d12_post_norm_qk_norm|d12_mla|d12_window|d12_window_large|d12_gemb|d24|d36|d48",
     )
     # token layout for each step of the optimization
     parser.add_argument(
@@ -741,7 +772,7 @@ if __name__ == "__main__":
     B, T = args.batch_size, args.sequence_length
     assert args.model in {
         "d12", "d12_post_norm", "d12_post_norm_qk_norm", "d12_mla", 
-        "d12_window", "d12_window_large", "d24", "d36", "d48"
+        "d12_window", "d12_window_large", "d12_gemb", "d24", "d36", "d48"
     }
     # set up DDP (distributed data parallel). torchrun sets this env variable
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
@@ -805,8 +836,8 @@ if __name__ == "__main__":
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, post_norm=True, qk_norm=True
         ),  # 124M GPT-2 with hybrid normalization + QK normalization
         "d12_mla": GPTConfig(
-            vocab_size=num_vocab, n_layer=12, n_head=16, n_embd=1024,
-            post_norm=True, qk_norm=True, attention_type="latent", n_latent=256
+            vocab_size=num_vocab, n_layer=12, n_head=20, n_embd=1280,
+            post_norm=True, qk_norm=True, attention_type="latent", n_latent=320
         ),  # 124M GPT-2 with MLA + post-norm + QK norm
         "d12_window": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
@@ -817,6 +848,9 @@ if __name__ == "__main__":
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
             post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=64
         ),  # 124M GPT-2 with large sliding window attention
+        "d12_gemb": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, use_gated_embedding=True
+        ),  # 124M GPT-2 with gated embeddings
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),
         "d48": GPTConfig(vocab_size=num_vocab, n_layer=48, n_head=25, n_embd=1600),
