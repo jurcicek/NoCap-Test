@@ -359,27 +359,52 @@ class Block(nn.Module):
         return x
 
 class GatedEmbedding(nn.Module):
-    def __init__(self, vocab_size, embed_dim):
+    def __init__(self, vocab_size, embed_dim, bottleneck_factor=4):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.gate = nn.Linear(embed_dim, embed_dim)
+        bottleneck_dim = embed_dim // bottleneck_factor
+        self.gate_down = nn.Linear(embed_dim, bottleneck_dim, bias=False)
+        self.gate_up = nn.Linear(bottleneck_dim, embed_dim, bias=False)
         self.sigmoid = nn.Sigmoid()
-        
+
     def forward(self, x):
         # Get embeddings
         emb = self.embedding(x)
-        
+
         # Compute gate
-        gate_values = self.sigmoid(self.gate(emb))
-        
+        gate_hidden = self.gate_down(emb)
+        gate_values = self.sigmoid(self.gate_up(gate_hidden))
+
         # Apply gating
         gated_emb = gate_values * emb
-        
+
         return gated_emb
-        
+
+class GatedLMHead(nn.Module):
+    def __init__(self, embed_dim, vocab_size, bottleneck_factor=4):
+        super().__init__()
+        bottleneck_dim = embed_dim // bottleneck_factor
+        self.gate_down = nn.Linear(embed_dim, bottleneck_dim, bias=False)
+        self.gate_up = nn.Linear(bottleneck_dim, embed_dim, bias=False)
+        self.sigmoid = nn.Sigmoid()
+        self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
+
+    def forward(self, x):
+        # Compute gate with bottleneck
+        gate_hidden = self.gate_down(x)
+        gate_values = self.sigmoid(self.gate_up(gate_hidden))
+
+        # Apply gating
+        gated_values = x * gate_values
+
+        # Get logits
+        logits = self.lm_head(gated_values)
+
+        return logits
+
+
 # -----------------------------------------------------------------------------
 # The main GPT-2 model
-
 
 @dataclass
 class GPTConfig:
@@ -409,6 +434,9 @@ class GPTConfig:
     # gradient_checkpointing: bool = False  # Gradient checkpointing for memory efficiency
     gradient_checkpointing: bool = True  # Gradient checkpointing for memory efficiency
     use_gated_embedding: bool = False  # Use gated embeddings
+    use_gated_lm_head: bool = False # Use gated lm_head
+    gated_embedding_bottleneck_factor: int = 4 # Bottleneck factor for GatedEmbedding
+    gated_lm_head_bottleneck_factor: int = 4 # Bottleneck factor for GatedLMHead
 
 
 class GPT(nn.Module):
@@ -419,7 +447,8 @@ class GPT(nn.Module):
 
         # Choose embedding type based on configuration
         if config.use_gated_embedding:
-            embedding_layer = GatedEmbedding(config.vocab_size, config.n_embd)
+            embedding_layer = GatedEmbedding(config.vocab_size, config.n_embd,
+                                             bottleneck_factor=config.gated_embedding_bottleneck_factor)
         else:
             embedding_layer = nn.Embedding(config.vocab_size, config.n_embd)
 
@@ -429,11 +458,19 @@ class GPT(nn.Module):
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        if config.use_gated_lm_head:
+            self.lm_head = GatedLMHead(config.n_embd, config.vocab_size,
+                                       bottleneck_factor=config.gated_lm_head_bottleneck_factor)
+        else:
+            self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
         # Tie weights for both embedding types
-        if config.use_gated_embedding:
+        if config.use_gated_embedding and not config.use_gated_lm_head:
             self.transformer.wte.embedding.weight = self.lm_head.weight
+        elif config.use_gated_lm_head and not config.use_gated_embedding:
+            self.transformer.wte.weight = self.lm_head.lm_head.weight
+        elif config.use_gated_embedding and config.use_gated_lm_head:
+            self.transformer.wte.embedding.weight = self.lm_head.lm_head.weight
         else:
             self.transformer.wte.weight = (
                 self.lm_head.weight
@@ -697,7 +734,12 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="d12",
-        help="d12|d12_post_norm|d12_post_norm_qk_norm|d12_mla|d12_window|d12_window_large|d12_gemb|d24|d36|d48",
+            help=
+            "d12|"
+            "d12_post_norm|d12_post_norm_qk_norm|d12_mla|"
+            "d12_window|d12_window_large|"
+            "d12_gemb|d12_ghead|d12_gemb_ghead|"
+            "d24|d36|d48",
     )
     # token layout for each step of the optimization
     parser.add_argument(
@@ -772,7 +814,8 @@ if __name__ == "__main__":
     B, T = args.batch_size, args.sequence_length
     assert args.model in {
         "d12", "d12_post_norm", "d12_post_norm_qk_norm", "d12_mla", 
-        "d12_window", "d12_window_large", "d12_gemb", "d24", "d36", "d48"
+        "d12_window", "d12_window_large", "d12_gemb", "d12_ghead", "d12_gemb_ghead",
+        "d24", "d36", "d48",
     }
     # set up DDP (distributed data parallel). torchrun sets this env variable
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
@@ -851,6 +894,13 @@ if __name__ == "__main__":
         "d12_gemb": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, use_gated_embedding=True
         ),  # 124M GPT-2 with gated embeddings
+        "d12_ghead": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, use_gated_lm_head=True
+        ),  # 124M GPT-2 with gated lm_head
+        "d12_gemb_ghead": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, 
+            use_gated_lm_head=True, use_gated_embedding=True
+        ),  # 124M GPT-2 with gated lm_head and gated embeddings
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),
         "d48": GPTConfig(vocab_size=num_vocab, n_layer=48, n_head=25, n_embd=1600),
