@@ -1,0 +1,1 @@
+Use content from [AGENTS.md]
