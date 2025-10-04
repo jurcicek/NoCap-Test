@@ -358,64 +358,27 @@ class Block(nn.Module):
             x = x + self.mlp(rmsnorm(x))
         return x
 
-class GatedEmbedding(nn.Module):
-    def __init__(self, vocab_size, embed_dim, bottleneck_factor=4):
+class GatedGLUModule(nn.Module):
+    """Base class for GLU-style gated modules with RMSNorm, SiLU activation, and residual connections.
+    
+    This module provides the core GLU (Gated Linear Unit) functionality that can be reused
+    across different parts of the model (embeddings, LM heads, etc.). It includes:
+    - RMSNorm pre-normalization
+    - GLU-style gating with separate value and gate branches
+    - Bottleneck MLP for the gate computation
+    - SiLU activation for the gate
+    - Residual connection for stable training
+    - Identity-preserving initialization
+    """
+    def __init__(self, embed_dim, bottleneck_factor=4):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        bottleneck_dim = embed_dim // bottleneck_factor
-        self.gate_down = nn.Linear(embed_dim, bottleneck_dim, bias=False)
-        self.gate_up = nn.Linear(bottleneck_dim, embed_dim, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        # Get embeddings
-        emb = self.embedding(x)
-
-        # Compute gate
-        gate_hidden = self.gate_down(emb)
-        gate_values = self.sigmoid(self.gate_up(gate_hidden))
-
-        # Apply gating
-        gated_emb = gate_values * emb
-
-        return gated_emb
-
-class GatedLMHead(nn.Module):
-    def __init__(self, embed_dim, vocab_size, bottleneck_factor=4):
-        super().__init__()
-        bottleneck_dim = embed_dim // bottleneck_factor
-        self.gate_down = nn.Linear(embed_dim, bottleneck_dim, bias=False)
-        self.gate_up = nn.Linear(bottleneck_dim, embed_dim, bias=False)
-        self.sigmoid = nn.Sigmoid()
-        self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
-
-    def forward(self, x):
-        # Compute gate with bottleneck
-        gate_hidden = self.gate_down(x)
-        gate_values = self.sigmoid(self.gate_up(gate_hidden))
-
-        # Apply gating
-        gated_values = x * gate_values
-
-        # Get logits
-        logits = self.lm_head(gated_values)
-
-        return logits
-
-
-# New GLU-based gated LM head that hardcodes RMSNorm + SiLU + GLU + residual gating
-class GatedGLULMHeadRMSNorm(nn.Module):
-    def __init__(self, embed_dim, vocab_size, bottleneck_factor=4):
-        super().__init__()
-        bottleneck_dim = embed_dim // bottleneck_factor
-        # Pre-normalization: RMSNorm only
         self.embed_dim = embed_dim
+        bottleneck_dim = embed_dim // bottleneck_factor
+        
         # GLU-style: separate value and gate projections; gate uses bottleneck MLP
         self.value_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.gate_down = nn.Linear(embed_dim, bottleneck_dim, bias=True)
         self.gate_up = nn.Linear(bottleneck_dim, embed_dim, bias=True)
-        # Output projection (for logits); must remain bias=False to support weight tying
-        self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
 
         # Better initialization for identity preservation and balanced training
         with torch.no_grad():
@@ -436,17 +399,43 @@ class GatedGLULMHeadRMSNorm(nn.Module):
             nn.init.xavier_uniform_(self.gate_up.weight, gain=0.1)
             # gate_up.bias already set above for identity preservation
 
-    def forward(self, x):
+    def glu_forward(self, x, residual_input=None):
+        """Apply GLU-style gating with RMSNorm and residual connection.
+        
+        Args:
+            x: Input tensor to process
+            residual_input: Optional residual input (if None, uses x as residual)
+        
+        Returns:
+            Gated output tensor
+        """
+        if residual_input is None:
+            residual_input = x
+            
         # RMSNorm pre-norm
         x_norm = rmsnorm(x)
+        
         # GLU value branch
         values = self.value_proj(x_norm)
+        
         # Gate branch with SiLU
         gate_hidden = self.gate_down(x_norm)
         pre_act = self.gate_up(gate_hidden)
         gate_values = F.silu(pre_act)
+        
         # Residual gating 
-        gated_values = values * gate_values + x
+        return values * gate_values + residual_input
+
+
+class GatedLMHead(GatedGLUModule):
+    def __init__(self, embed_dim, vocab_size, bottleneck_factor=4):
+        super().__init__(embed_dim, bottleneck_factor)
+        # Output projection (for logits); must remain bias=False to support weight tying
+        self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
+
+    def forward(self, x):
+        # Apply GLU-style gating with residual connection
+        gated_values = self.glu_forward(x, x)
         # Logits
         logits = self.lm_head(gated_values)
         return logits
@@ -469,7 +458,6 @@ class GPTConfig:
                         Options: 'standard', 'latent', 'sliding_window'
         window_size: Window size for sliding window attention (only used if attention_type='sliding_window').
         gradient_checkpointing: If True, use gradient checkpointing for memory efficiency.
-        use_gated_embedding: If True, use gated embeddings instead of standard embeddings.
     """
     vocab_size: int = 50257
     n_layer: int = 12
@@ -482,11 +470,8 @@ class GPTConfig:
     window_size: int = 64  # Window size for sliding window attention
     # gradient_checkpointing: bool = False  # Gradient checkpointing for memory efficiency
     gradient_checkpointing: bool = True  # Gradient checkpointing for memory efficiency
-    use_gated_embedding: bool = False  # Use gated embeddings
-    use_gated_lm_head: bool = False # Use gated lm_head
-    gated_embedding_bottleneck_factor: int = 4 # Bottleneck factor for GatedEmbedding
-    gated_lm_head_bottleneck_factor: int = 4 # Bottleneck factor for GatedLMHead
-    use_gated_glu_lm_head: bool = False  # Use the hardcoded RMSNorm+SiLU GLU gated head
+    use_gated_lm_head: bool = False  # Use the gated LM head
+    gated_bottleneck_factor: int = 4 # Bottleneck factor for all gated modules
 
 
 class GPT(nn.Module):
@@ -495,12 +480,8 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
-        # Choose embedding type based on configuration
-        if config.use_gated_embedding:
-            embedding_layer = GatedEmbedding(config.vocab_size, config.n_embd,
-                                             bottleneck_factor=config.gated_embedding_bottleneck_factor)
-        else:
-            embedding_layer = nn.Embedding(config.vocab_size, config.n_embd)
+        # Use standard embedding layer
+        embedding_layer = nn.Embedding(config.vocab_size, config.n_embd)
 
         self.transformer = nn.ModuleDict(
             dict(
@@ -508,18 +489,11 @@ class GPT(nn.Module):
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             )
         )
-        if config.use_gated_glu_lm_head:
-            self.lm_head = GatedGLULMHeadRMSNorm(
-                config.n_embd,
-                config.vocab_size,
-                bottleneck_factor=config.gated_lm_head_bottleneck_factor,
-            )
-        elif config.use_gated_lm_head:
+        if config.use_gated_lm_head:
             self.lm_head = GatedLMHead(
                 config.n_embd,
                 config.vocab_size,
-                bottleneck_factor=config.gated_lm_head_bottleneck_factor,
-        
+                bottleneck_factor=config.gated_bottleneck_factor,
             )
         else:
             self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -529,11 +503,11 @@ class GPT(nn.Module):
         # The logic here correctly finds the underlying weight matrix regardless of
         # whether standard or gated modules are used.
         
-        # Get the actual embedding layer (it's nested inside GatedEmbedding)
-        embedding_layer_for_tying = self.transformer.wte.embedding if config.use_gated_embedding else self.transformer.wte
+        # Get the embedding layer for weight tying
+        embedding_layer_for_tying = self.transformer.wte
         
         # Get the actual final projection layer (it's nested inside gated heads)
-        if config.use_gated_lm_head or config.use_gated_glu_lm_head:
+        if config.use_gated_lm_head:
             embedding_layer_for_tying.weight = self.lm_head.lm_head.weight
         else:
             embedding_layer_for_tying.weight = self.lm_head.weight
@@ -953,20 +927,10 @@ if __name__ == "__main__":
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
             post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=64
         ),  # 124M GPT-2 with large sliding window attention
-        "d12_gemb": GPTConfig(
-            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, use_gated_embedding=True
-        ),  # 124M GPT-2 with gated embeddings
         "d12_ghead": GPTConfig(
-            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, use_gated_lm_head=True
-        ),  # 124M GPT-2 with configurable gated lm_head
-        "d12_gemb_ghead": GPTConfig(
-            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, 
-            use_gated_lm_head=True, use_gated_embedding=True
-        ),  # 124M GPT-2 with gated lm_head and gated embeddings
-        "d12_glu_head": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
-            use_gated_glu_lm_head=True
-        ),  # 124M GPT-2 with GLU RMSNorm+SiLU gated lm_head
+            use_gated_lm_head=True
+        ),  # 124M GPT-2 with gated LM head
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),
         "d48": GPTConfig(vocab_size=num_vocab, n_layer=48, n_head=25, n_embd=1600),
