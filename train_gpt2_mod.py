@@ -524,17 +524,19 @@ class GPT(nn.Module):
         else:
             self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-        # Tie weights for both embedding types
-        if config.use_gated_embedding and not (config.use_gated_lm_head or config.use_gated_glu_lm_head):
-            self.transformer.wte.embedding.weight = self.lm_head.weight
-        elif (config.use_gated_lm_head or config.use_gated_glu_lm_head) and not config.use_gated_embedding:
-            self.transformer.wte.weight = self.lm_head.lm_head.weight
-        elif config.use_gated_embedding and (config.use_gated_lm_head or config.use_gated_glu_lm_head):
-            self.transformer.wte.embedding.weight = self.lm_head.lm_head.weight
+        # Tie the weights of the token embedding and the final LM head.
+        # This is a standard practice for improving performance and reducing parameters.
+        # The logic here correctly finds the underlying weight matrix regardless of
+        # whether standard or gated modules are used.
+        
+        # Get the actual embedding layer (it's nested inside GatedEmbedding)
+        embedding_layer_for_tying = self.transformer.wte.embedding if config.use_gated_embedding else self.transformer.wte
+        
+        # Get the actual final projection layer (it's nested inside gated heads)
+        if config.use_gated_lm_head or config.use_gated_glu_lm_head:
+            embedding_layer_for_tying.weight = self.lm_head.lm_head.weight
         else:
-            self.transformer.wte.weight = (
-                self.lm_head.weight
-            )  # https://paperswithcode.com/method/weight-tying
+            embedding_layer_for_tying.weight = self.lm_head.weight
 
     def forward(self, idx, targets=None, return_logits=True):
         b, t = idx.size()
