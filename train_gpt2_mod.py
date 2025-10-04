@@ -299,9 +299,9 @@ class SlidingWindowAttention(nn.Module):
         Assumes FlashAttention-2 is always available.
         """
         # Ensure inputs are in the correct dtype for FlashAttention
-        q_fa = q.transpose(1, 2).half()  # (B, H, T, D) - FlashAttention requires fp16/bf16
-        k_fa = k.transpose(1, 2).half()
-        v_fa = v.transpose(1, 2).half()
+        q_fa = q.transpose(1, 2).to(torch.bfloat16)  # (B, H, T, D) - FlashAttention requires fp16/bf16
+        k_fa = k.transpose(1, 2).to(torch.bfloat16)
+        v_fa = v.transpose(1, 2).to(torch.bfloat16)
         
         # FlashAttention-2 with sliding window
         y = flash_attn.flash_attn_func(
@@ -939,7 +939,8 @@ if __name__ == "__main__":
     model_config = base_configs[args.model]
     
     model = GPT(model_config)
-    model = model.train().cuda().to(dtype=torch.bfloat16)
+    # AI, I want .to(dtype=torch.bfloat16) here
+    model = model.train().to(dtype=torch.bfloat16).cuda()
     if hasattr(config, "coordinate_descent_tuning"):
         config.coordinate_descent_tuning = True  # suggested by @Chillee
     print0("compiling the model...")
