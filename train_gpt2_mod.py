@@ -403,6 +403,55 @@ class GatedLMHead(nn.Module):
         return logits
 
 
+# New GLU-based gated LM head that hardcodes RMSNorm + SiLU + GLU + residual gating
+class GatedGLULMHeadRMSNorm(nn.Module):
+    def __init__(self, embed_dim, vocab_size, bottleneck_factor=4):
+        super().__init__()
+        bottleneck_dim = embed_dim // bottleneck_factor
+        # Pre-normalization: RMSNorm only
+        self.embed_dim = embed_dim
+        # GLU-style: separate value and gate projections; gate uses bottleneck MLP
+        self.value_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.gate_down = nn.Linear(embed_dim, bottleneck_dim, bias=True)
+        self.gate_up = nn.Linear(bottleneck_dim, embed_dim, bias=True)
+        # Output projection (for logits); must remain bias=False to support weight tying
+        self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
+
+        # Better initialization for identity preservation and balanced training
+        with torch.no_grad():
+            # Initialize gate_up bias so SiLU output ≈ 1.0 at init (identity preservation)
+            if self.gate_up.bias is not None:
+                self.gate_up.bias.fill_(1.28)  # SiLU(1.28) ≈ 1.0
+            
+            # Initialize value projection with small weights to avoid large initial values
+            nn.init.xavier_uniform_(self.value_proj.weight, gain=0.1)
+            if self.value_proj.bias is not None:
+                self.value_proj.bias.zero_()
+            
+            # Initialize gate projections with small weights
+            nn.init.xavier_uniform_(self.gate_down.weight, gain=0.1)
+            if self.gate_down.bias is not None:
+                self.gate_down.bias.zero_()
+            
+            nn.init.xavier_uniform_(self.gate_up.weight, gain=0.1)
+            # gate_up.bias already set above for identity preservation
+
+    def forward(self, x):
+        # RMSNorm pre-norm
+        x_norm = rmsnorm(x)
+        # GLU value branch
+        values = self.value_proj(x_norm)
+        # Gate branch with SiLU
+        gate_hidden = self.gate_down(x_norm)
+        pre_act = self.gate_up(gate_hidden)
+        gate_values = F.silu(pre_act)
+        # Residual gating 
+        gated_values = values * gate_values + x
+        # Logits
+        logits = self.lm_head(gated_values)
+        return logits
+
+
 # -----------------------------------------------------------------------------
 # The main GPT-2 model
 
@@ -437,6 +486,7 @@ class GPTConfig:
     use_gated_lm_head: bool = False # Use gated lm_head
     gated_embedding_bottleneck_factor: int = 4 # Bottleneck factor for GatedEmbedding
     gated_lm_head_bottleneck_factor: int = 4 # Bottleneck factor for GatedLMHead
+    use_gated_glu_lm_head: bool = False  # Use the hardcoded RMSNorm+SiLU GLU gated head
 
 
 class GPT(nn.Module):
@@ -458,18 +508,28 @@ class GPT(nn.Module):
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             )
         )
-        if config.use_gated_lm_head:
-            self.lm_head = GatedLMHead(config.n_embd, config.vocab_size,
-                                       bottleneck_factor=config.gated_lm_head_bottleneck_factor)
+        if config.use_gated_glu_lm_head:
+            self.lm_head = GatedGLULMHeadRMSNorm(
+                config.n_embd,
+                config.vocab_size,
+                bottleneck_factor=config.gated_lm_head_bottleneck_factor,
+            )
+        elif config.use_gated_lm_head:
+            self.lm_head = GatedLMHead(
+                config.n_embd,
+                config.vocab_size,
+                bottleneck_factor=config.gated_lm_head_bottleneck_factor,
+        
+            )
         else:
             self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
         # Tie weights for both embedding types
-        if config.use_gated_embedding and not config.use_gated_lm_head:
+        if config.use_gated_embedding and not (config.use_gated_lm_head or config.use_gated_glu_lm_head):
             self.transformer.wte.embedding.weight = self.lm_head.weight
-        elif config.use_gated_lm_head and not config.use_gated_embedding:
+        elif (config.use_gated_lm_head or config.use_gated_glu_lm_head) and not config.use_gated_embedding:
             self.transformer.wte.weight = self.lm_head.lm_head.weight
-        elif config.use_gated_embedding and config.use_gated_lm_head:
+        elif config.use_gated_embedding and (config.use_gated_lm_head or config.use_gated_glu_lm_head):
             self.transformer.wte.embedding.weight = self.lm_head.lm_head.weight
         else:
             self.transformer.wte.weight = (
@@ -738,7 +798,7 @@ if __name__ == "__main__":
             "d12|"
             "d12_post_norm|d12_post_norm_qk_norm|d12_mla|"
             "d12_window|d12_window_large|"
-            "d12_gemb|d12_ghead|d12_gemb_ghead|"
+            "d12_gemb|d12_ghead|d12_gemb_ghead|d12_glu_head|"
             "d24|d36|d48",
     )
     # token layout for each step of the optimization
@@ -814,7 +874,7 @@ if __name__ == "__main__":
     B, T = args.batch_size, args.sequence_length
     assert args.model in {
         "d12", "d12_post_norm", "d12_post_norm_qk_norm", "d12_mla", 
-        "d12_window", "d12_window_large", "d12_gemb", "d12_ghead", "d12_gemb_ghead",
+        "d12_window", "d12_window_large", "d12_gemb", "d12_ghead", "d12_gemb_ghead", "d12_glu_head",
         "d24", "d36", "d48",
     }
     # set up DDP (distributed data parallel). torchrun sets this env variable
@@ -896,11 +956,15 @@ if __name__ == "__main__":
         ),  # 124M GPT-2 with gated embeddings
         "d12_ghead": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, use_gated_lm_head=True
-        ),  # 124M GPT-2 with gated lm_head
+        ),  # 124M GPT-2 with configurable gated lm_head
         "d12_gemb_ghead": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768, 
             use_gated_lm_head=True, use_gated_embedding=True
         ),  # 124M GPT-2 with gated lm_head and gated embeddings
+        "d12_glu_head": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
+            use_gated_glu_lm_head=True
+        ),  # 124M GPT-2 with GLU RMSNorm+SiLU gated lm_head
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),
         "d48": GPTConfig(vocab_size=num_vocab, n_layer=48, n_head=25, n_embd=1600),

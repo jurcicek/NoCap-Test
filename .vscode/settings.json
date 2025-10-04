@@ -3,6 +3,8 @@
         "autocast",
         "embd",
         "gemb",
-        "rmsnorm"
+        "GLULM",
+        "rmsnorm",
+        "silu"
     ]
 }
