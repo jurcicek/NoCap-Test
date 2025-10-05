@@ -195,8 +195,8 @@ class MultiHeadLatentAttention(nn.Module):
         self.out_proj_fused = nn.Linear(self.n_latent, self.n_embd, bias=False)
         self.rotary = Rotary(self.latent_head_dim)
 
-        print(f"Applying Multi-Head Latent Attention {self.n_embd=} {self.n_head=} {self.head_dim=}")
-        print(f"Applying Multi-Head Latent Attention {self.n_latent=} {self.latent_head_dim=}")
+        # print(f"Applying Multi-Head Latent Attention {self.n_embd=} {self.n_head=} {self.head_dim=}")
+        # print(f"Applying Multi-Head Latent Attention {self.n_latent=} {self.latent_head_dim=}")
 
     def forward(self, x, attention_mask=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
@@ -233,6 +233,169 @@ class MultiHeadLatentAttention(nn.Module):
         return y
 
 
+class GroupedQueryAttention(nn.Module):
+    """Grouped Query Attention (GQA) for efficient attention computation.
+    
+    GQA groups multiple query heads to share the same key-value heads,
+    reducing computation and memory while maintaining most of the quality
+    of standard multi-head attention.
+    
+    Args:
+        config: Model configuration with:
+            - n_embd: Embedding dimension
+            - n_head: Number of query heads
+            - n_kv_head: Number of key-value heads (n_head must be divisible by this)
+            - qk_norm: Whether to apply QK normalization
+    """
+    
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.n_head = config.n_head  # Number of query heads (e.g., 12)
+        self.n_kv_head = getattr(config, 'n_kv_head', config.n_head)  # Number of KV heads (e.g., 4)
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        
+        assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"
+        assert self.n_head % self.n_kv_head == 0, "n_head must be divisible by n_kv_head"
+        
+        self.n_rep = self.n_head // self.n_kv_head  # How many Q heads per KV head
+        
+        # Separate Q, K, V projections for GQA
+        self.q_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.k_proj = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        
+        # Output projection
+        self.o_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        
+        # Rotary embeddings
+        self.rotary = Rotary(self.head_dim)
+        
+        print(f"GroupedQueryAttention: {self.n_head} Q heads, {self.n_kv_head} KV heads "
+              f"({self.n_rep} Q heads per KV head), head_dim={self.head_dim}")
+    
+    def forward(self, x):
+        B, T, C = x.size()  # batch, seq_len, n_embd
+        
+        # Compute Q, K, V
+        q = self.q_proj(x)  # (B, T, n_embd)
+        k = self.k_proj(x)  # (B, T, n_kv_head * head_dim)
+        v = self.v_proj(x)  # (B, T, n_kv_head * head_dim)
+        
+        # Reshape for multi-head attention
+        q = q.view(B, T, self.n_head, self.head_dim)      # (B, T, n_head, head_dim)
+        k = k.view(B, T, self.n_kv_head, self.head_dim)   # (B, T, n_kv_head, head_dim)
+        v = v.view(B, T, self.n_kv_head, self.head_dim)   # (B, T, n_kv_head, head_dim)
+        
+        # Apply QK normalization if enabled
+        if getattr(self.config, 'qk_norm', False):
+            q = rmsnorm(q, eps=1e-6)
+            k = rmsnorm(k, eps=1e-6)
+        
+        # Apply rotary embeddings
+        cos, sin = self.rotary(q)
+        q = apply_rotary_emb(q, cos, sin)
+        
+        # Apply rotary to K (need to broadcast cos/sin for fewer KV heads)
+        # cos, sin are (1, T, 1, head_dim/2) - they work for any number of heads
+        k = apply_rotary_emb(k, cos, sin)
+        
+        # Repeat K and V to match the number of query heads
+        # This is the key trick of GQA: expand KV to match Q heads
+        if self.n_rep > 1:
+            # Repeat each KV head n_rep times
+            # (B, T, n_kv_head, head_dim) -> (B, T, n_head, head_dim)
+            k = k.unsqueeze(3).repeat(1, 1, 1, self.n_rep, 1)  # (B, T, n_kv_head, n_rep, head_dim)
+            k = k.reshape(B, T, self.n_head, self.head_dim)
+            
+            v = v.unsqueeze(3).repeat(1, 1, 1, self.n_rep, 1)  # (B, T, n_kv_head, n_rep, head_dim)
+            v = v.reshape(B, T, self.n_head, self.head_dim)
+        
+        # Transpose for attention: (B, n_head, T, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        
+        # Compute attention
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        
+        # Reshape and project output
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.o_proj(y)
+        
+        return y
+
+
+class MultiQueryAttention(nn.Module):
+    """Multi-Query Attention (MQA) - extreme version of GQA with single KV head.
+    
+    MQA uses a single set of K,V heads shared across all Q heads.
+    This provides maximum speedup but may have slightly lower quality than GQA.
+    
+    Used in: PaLM, Falcon, StarCoder models.
+    """
+    
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        
+        assert self.n_embd % self.n_head == 0
+        
+        # Q: full multi-head, K,V: single head
+        self.q_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.k_proj = nn.Linear(self.n_embd, self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.n_embd, self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        
+        self.rotary = Rotary(self.head_dim)
+        
+        print(f"MultiQueryAttention: {self.n_head} Q heads, 1 KV head, head_dim={self.head_dim}")
+    
+    def forward(self, x):
+        B, T, C = x.size()
+        
+        # Compute Q (multi-head), K, V (single head)
+        q = self.q_proj(x)  # (B, T, n_embd)
+        k = self.k_proj(x)  # (B, T, head_dim)
+        v = self.v_proj(x)  # (B, T, head_dim)
+        
+        # Reshape
+        q = q.view(B, T, self.n_head, self.head_dim)  # (B, T, n_head, head_dim)
+        k = k.view(B, T, 1, self.head_dim)            # (B, T, 1, head_dim)
+        v = v.view(B, T, 1, self.head_dim)            # (B, T, 1, head_dim)
+        
+        # QK normalization
+        if getattr(self.config, 'qk_norm', False):
+            q = rmsnorm(q, eps=1e-6)
+            k = rmsnorm(k, eps=1e-6)
+        
+        # Apply rotary embeddings
+        cos, sin = self.rotary(q)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        
+        # Expand K, V to match Q heads
+        k = k.expand(B, T, self.n_head, self.head_dim)
+        v = v.expand(B, T, self.n_head, self.head_dim)
+        
+        # Transpose and compute attention
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        
+        # Output
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.o_proj(y)
+        
+        return y
+
+
 class SlidingWindowAttention(nn.Module):
     """Sliding window attention implementation using FlashAttention-2.
     
@@ -258,7 +421,7 @@ class SlidingWindowAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.rotary = Rotary(self.head_dim)
         
-        print(f"SlidingWindowAttention: window_size={self.window_size}, n_head={self.n_head}, head_dim={self.head_dim}")
+        # print(f"SlidingWindowAttention: window_size={self.window_size}, n_head={self.n_head}, head_dim={self.head_dim}")
 
     def forward(self, x):
         B, T, C = x.size()
@@ -295,23 +458,28 @@ class SlidingWindowAttention(nn.Module):
         return y
     
     def _flash_attention_sliding_window(self, q, k, v, window_size):
-        """Use FlashAttention-2 with sliding window support.
-        Assumes FlashAttention-2 is always available.
+        """Use PyTorch native attention with sliding window mask.
+        This should be faster than FlashAttention-2 for this use case.
         """
-        # Ensure inputs are in the correct dtype for FlashAttention
-        q_fa = q.transpose(1, 2).to(torch.bfloat16)  # (B, H, T, D) - FlashAttention requires fp16/bf16
-        k_fa = k.transpose(1, 2).to(torch.bfloat16)
-        v_fa = v.transpose(1, 2).to(torch.bfloat16)
+        B, T, H, D = q.shape
         
-        # FlashAttention-2 with sliding window
-        y = flash_attn.flash_attn_func(
-            q_fa, k_fa, v_fa,
-            causal=True,
-            window_size=(window_size, 0)  # Sliding window support
+        # Create sliding window attention mask
+        mask = create_sliding_window_attn_mask(T, window_size, q.device)
+        
+        # Transpose to (B, H, T, D) format for attention
+        q_t = q.transpose(1, 2)  # (B, H, T, D)
+        k_t = k.transpose(1, 2)  # (B, H, T, D)
+        v_t = v.transpose(1, 2)  # (B, H, T, D)
+        
+        # Use PyTorch's optimized scaled_dot_product_attention with sliding window mask
+        y = F.scaled_dot_product_attention(
+            q_t, k_t, v_t,
+            attn_mask=mask,
+            is_causal=True
         )
         
-        # Convert back to original dtype and shape
-        return y.transpose(1, 2).view(q.shape[0], q.shape[1], self.n_embd).to(q.dtype)
+        # Convert back to original shape
+        return y.transpose(1, 2).view(B, T, self.n_embd)
 
 
 class MLP(nn.Module):
@@ -341,6 +509,10 @@ class Block(nn.Module):
             self.attn = SlidingWindowAttention(config)
         elif attention_type == 'latent':
             self.attn = MultiHeadLatentAttention(config)
+        elif attention_type == 'gqa':
+            self.attn = GroupedQueryAttention(config)
+        elif attention_type == 'mqa':
+            self.attn = MultiQueryAttention(config)
         else:  # standard or default
             self.attn = CausalSelfAttention(config)
         
@@ -455,8 +627,9 @@ class GPTConfig:
                  If False, use standard attention without QK normalization.
         n_latent: Dimension of latent space for latent attention.
         attention_type: Type of attention mechanism to use.
-                        Options: 'standard', 'latent', 'sliding_window'
+                        Options: 'standard', 'latent', 'sliding_window', 'gqa', 'mqa'
         window_size: Window size for sliding window attention (only used if attention_type='sliding_window').
+        n_kv_head: Number of key-value heads for GQA (only used if attention_type='gqa').
         gradient_checkpointing: If True, use gradient checkpointing for memory efficiency.
     """
     vocab_size: int = 50257
@@ -468,6 +641,7 @@ class GPTConfig:
     n_latent: int = 384  # Latent space dimension
     attention_type: str = "standard"  # Attention mechanism type
     window_size: int = 64  # Window size for sliding window attention
+    n_kv_head: int = 4  # Number of key-value heads for GQA
     # gradient_checkpointing: bool = False  # Gradient checkpointing for memory efficiency
     gradient_checkpointing: bool = True  # Gradient checkpointing for memory efficiency
     use_gated_lm_head: bool = False  # Use the gated LM head
@@ -774,6 +948,7 @@ if __name__ == "__main__":
             "d12|"
             "d12_post_norm|d12_post_norm_qk_norm|d12_mla|"
             "d12_window|d12_window_large|"
+            "d12_gqa|d12_mqa|"
             "d12_gemb|d12_ghead|d12_gemb_ghead|d12_glu_head|"
             "d24|d36|d48",
     )
@@ -850,7 +1025,8 @@ if __name__ == "__main__":
     B, T = args.batch_size, args.sequence_length
     assert args.model in {
         "d12", "d12_post_norm", "d12_post_norm_qk_norm", "d12_mla", 
-        "d12_window", "d12_window_large", "d12_gemb", "d12_ghead", "d12_gemb_ghead", "d12_glu_head",
+        "d12_window", "d12_window_large", "d12_gqa", "d12_mqa",
+        "d12_gemb", "d12_ghead", "d12_gemb_ghead", "d12_glu_head",
         "d24", "d36", "d48",
     }
     # set up DDP (distributed data parallel). torchrun sets this env variable
@@ -927,6 +1103,14 @@ if __name__ == "__main__":
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
             post_norm=True, qk_norm=True, attention_type="sliding_window", window_size=64
         ),  # 124M GPT-2 with large sliding window attention
+        "d12_gqa": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
+            post_norm=True, qk_norm=True, attention_type="gqa", n_kv_head=4
+        ),  # 124M GPT-2 with GQA (4 KV heads)
+        "d12_mqa": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
+            post_norm=True, qk_norm=True, attention_type="mqa"
+        ),  # 124M GPT-2 with MQA (1 KV head)
         "d12_ghead": GPTConfig(
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
             use_gated_lm_head=True
