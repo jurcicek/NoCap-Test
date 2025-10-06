@@ -14,8 +14,6 @@ import torch._inductor.config as config
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-import flash_attn
-
 import time
 
 
@@ -138,6 +136,8 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.rotary = Rotary(self.head_dim)
 
+        print(f"CausalSelfAttention: {self.n_head} heads, {self.n_embd=} {self.head_dim=}")
+
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -195,8 +195,8 @@ class MultiHeadLatentAttention(nn.Module):
         self.out_proj_fused = nn.Linear(self.n_latent, self.n_embd, bias=False)
         self.rotary = Rotary(self.latent_head_dim)
 
-        # print(f"Applying Multi-Head Latent Attention {self.n_embd=} {self.n_head=} {self.head_dim=}")
-        # print(f"Applying Multi-Head Latent Attention {self.n_latent=} {self.latent_head_dim=}")
+        print(f"Applying Multi-Head Latent Attention {self.n_embd=} {self.n_head=} {self.head_dim=}")
+        print(f"                                     {self.n_latent=} {self.latent_head_dim=}")
 
     def forward(self, x, attention_mask=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
@@ -421,7 +421,7 @@ class SlidingWindowAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.rotary = Rotary(self.head_dim)
         
-        # print(f"SlidingWindowAttention: window_size={self.window_size}, n_head={self.n_head}, head_dim={self.head_dim}")
+        print(f"SlidingWindowAttention: window_size={self.window_size}, n_head={self.n_head}, head_dim={self.head_dim}")
 
     def forward(self, x):
         B, T, C = x.size()
@@ -489,6 +489,8 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
 
+        print(f"MLP: {config.n_embd=} {4 * config.n_embd=} {config.n_embd=}")
+
     def forward(self, x):
         x = self.c_fc(x)
         x = F.gelu(x)
@@ -518,6 +520,8 @@ class Block(nn.Module):
         
         self.mlp = MLP(config)
         self.attn_scale = 1 / math.sqrt(2 * config.n_layer)
+
+        print(f"Block: {config.attention_type=} {config.n_layer=}")
 
     def forward(self, x):
         if self.config.post_norm:
@@ -571,6 +575,8 @@ class GatedGLUModule(nn.Module):
             nn.init.xavier_uniform_(self.gate_up.weight, gain=0.1)
             # gate_up.bias already set above for identity preservation
 
+        print(f"GatedGLUModule: {embed_dim=} {bottleneck_factor=}")
+
     def glu_forward(self, x, residual_input=None):
         """Apply GLU-style gating with RMSNorm and residual connection.
         
@@ -604,6 +610,8 @@ class GatedLMHead(GatedGLUModule):
         super().__init__(embed_dim, bottleneck_factor)
         # Output projection (for logits); must remain bias=False to support weight tying
         self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
+
+        print(f"GatedLMHead: {embed_dim=} {vocab_size=} {bottleneck_factor=}")
 
     def forward(self, x):
         # Apply GLU-style gating with residual connection
@@ -1005,7 +1013,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save_every",
         type=int,
-        default=5000,
+        default=500,
         help="every how many steps to save the checkpoint",
     )
     parser.add_argument(

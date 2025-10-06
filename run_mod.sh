@@ -1,4 +1,17 @@
+#! /bin/bash
+
+# "ls -lt logs/*/final.pt"
+# "ls -lt logs/*/final.pt | sort -k6,6nr | head -n 1"
+# "ls -lt logs/*/final.pt | sort -k6,6nr | head -n 1 | awk '{print $9}'"
+# "ls -lt logs/*/final.pt | sort -k6,6nr | head -n 1 | awk '{print $9}' | xargs -I {} echo --resume_from {}"
+
+RESUME_FROM=$(ls -lt logs/*/final.pt | sort -k6,6nr | head -n 1 | awk '{print $9}')
+RESUME_CMD=""
+# RESUME_CMD="--resume_from $RESUME_FROM"
+
+
 torchrun --standalone --nproc_per_node=1 train_gpt2_mod.py \
+  $RESUME_CMD \
   --input_bin "data/fineweb10B/fineweb_train_*.bin" \
   --input_val_bin "data/fineweb10B/fineweb_val_*.bin" \
   --output_dir pylog124M \
