@@ -11,68 +11,132 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 from train_gpt2_mod import GPT, GPTConfig
 
-def profile_model_forward_backward():
-    """Profile a single forward+backward pass of the model."""
+
+def layer_by_layer_analysis():
+    """Analyze time spent in each layer type."""
+    import time
     
-    # Setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=768)
-    config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=768, attention_type="grouped_query", n_kv_head=4)
+    # ====================================================================================================
+    # LAYER-BY-LAYER TIME BREAKDOWN
+    # ====================================================================================================
+
+    # Component                 Time (ms)       % of Forward Pass   
+    # ------------------------------------------------------------
+    # Embedding                     0.1143             0.1%
+    # Attention (per layer)         4.5856            58.7% of layer
+    # MLP (per layer)               3.2268            41.3% of layer
+    # All 12 layers                93.7492            74.6%
+    # LM Head                      31.7567            25.3%
+    # ------------------------------------------------------------
+    # TOTAL FORWARD               125.6202      100.0%
+    # ------------------------------------------------------------
+
+    # 📊 Key Insights:
+    # • Attention is 1.42× slower than MLP per layer
+    # • Attention takes 58.7% of each layer's time
+    # • Total layers take 74.6% of forward pass
+    # • Overhead (embed + LM head) is 25.4%
+    # config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=768, attention_type="grouped_query", n_kv_head=4)
+    config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=768, mlp_expansion_factor=3)
+    # ====================================================================================================
+    # LAYER-BY-LAYER TIME BREAKDOWN
+    # ====================================================================================================
+
+    # Component                 Time (ms)       % of Forward Pass   
+    # ------------------------------------------------------------
+    # Embedding                     0.0930             0.1%
+    # Attention (per layer)         4.2518            64.1% of layer
+    # MLP (per layer)               2.3791            35.9% of layer
+    # All 12 layers                79.5705            71.4%
+    # LM Head                      31.7622            28.5%
+    # ------------------------------------------------------------
+    # TOTAL FORWARD               111.4257      100.0%
+    # ------------------------------------------------------------
+
+    # 📊 Key Insights:
+    # • Attention is 1.79× slower than MLP per layer
+    # • Attention takes 64.1% of each layer's time
+    # • Total layers take 71.4% of forward pass
+    # • Overhead (embed + LM head) is 28.6%
+
+
+
     model = GPT(config).to(device).to(torch.bfloat16)
     
-    # Create dummy batch
-    B, T = 12, 1024  # batch size, sequence length
+    B, T = 12, 1024
     x = torch.randint(0, config.vocab_size, (B, T), device=device)
-    y = torch.randint(0, config.vocab_size, (B, T), device=device)
-    
-    # Warmup
-    print("Warming up...")
-    for _ in range(3):
-        logits, loss = model(x, y)
-        loss.backward()
-    
-    torch.cuda.synchronize()
-    
-    # Profile
-    print("\nProfiling model (forward + backward pass)...")
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-    ) as prof:
-        logits, loss = model(x, y)
-        loss.backward()
-    
-    torch.cuda.synchronize()
-    
-    # Print results
-    print("\n" + "="*100)
-    print("TOP 20 OPERATIONS BY CUDA TIME")
-    print("="*100)
-    print(prof.key_averages().table(
-        sort_by="cuda_time_total", 
-        row_limit=20,
-        max_name_column_width=80
-    ))
     
     print("\n" + "="*100)
-    print("TOP 20 OPERATIONS BY MEMORY USAGE")
+    print("LAYER-BY-LAYER TIME BREAKDOWN")
     print("="*100)
-    print(prof.key_averages().table(
-        sort_by="cuda_memory_usage", 
-        row_limit=20,
-        max_name_column_width=80
-    ))
     
-    # Export for visualization
-    print("\nExporting trace for visualization...")
-    prof.export_chrome_trace("model_profile_trace.json")
-    print("✓ Saved to model_profile_trace.json")
-    print("  View at: chrome://tracing")
+    # Profile individual layers
+    model.eval()
+    with torch.no_grad():
+        # Embedding
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        for _ in range(100):
+            _ = model.transformer.wte(x)
+        torch.cuda.synchronize()
+        emb_time = (time.perf_counter() - start) / 100 * 1000
+        
+        # Get embeddings for subsequent tests
+        hidden = model.transformer.wte(x)
+        
+        # Single attention layer
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        for _ in range(100):
+            _ = model.transformer.h[0].attn(hidden)
+        torch.cuda.synchronize()
+        attn_time = (time.perf_counter() - start) / 100 * 1000
+        
+        # Single MLP layer
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        for _ in range(100):
+            _ = model.transformer.h[0].mlp(hidden)
+        torch.cuda.synchronize()
+        mlp_time = (time.perf_counter() - start) / 100 * 1000
+        
+        # LM head
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        for _ in range(100):
+            _ = model.lm_head(hidden)
+        torch.cuda.synchronize()
+        lm_head_time = (time.perf_counter() - start) / 100 * 1000
+    
+    total_per_layer = attn_time + mlp_time
+    total_all_layers = total_per_layer * 12
+    total_forward = emb_time + total_all_layers + lm_head_time
+    
+    print(f"\n{'Component':<25} {'Time (ms)':<15} {'% of Forward Pass':<20}")
+    print("-"*60)
+    print(f"{'Embedding':<25} {emb_time:>10.4f}      {emb_time/total_forward*100:>10.1f}%")
+    print(f"{'Attention (per layer)':<25} {attn_time:>10.4f}      {attn_time/total_per_layer*100:>10.1f}% of layer")
+    print(f"{'MLP (per layer)':<25} {mlp_time:>10.4f}      {mlp_time/total_per_layer*100:>10.1f}% of layer")
+    print(f"{'All 12 layers':<25} {total_all_layers:>10.4f}      {total_all_layers/total_forward*100:>10.1f}%")
+    print(f"{'LM Head':<25} {lm_head_time:>10.4f}      {lm_head_time/total_forward*100:>10.1f}%")
+    print("-"*60)
+    print(f"{'TOTAL FORWARD':<25} {total_forward:>10.4f}      100.0%")
+    print("-"*60)
+    
+    print("\n📊 Key Insights:")
+    if attn_time > mlp_time:
+        ratio = attn_time / mlp_time
+        print(f"   • Attention is {ratio:.2f}× slower than MLP per layer")
+        print(f"   • Attention takes {attn_time/total_per_layer*100:.1f}% of each layer's time")
+    else:
+        ratio = mlp_time / attn_time
+        print(f"   • MLP is {ratio:.2f}× slower than Attention per layer")
+        print(f"   • MLP takes {mlp_time/total_per_layer*100:.1f}% of each layer's time")
+    
+    print(f"   • Total layers take {total_all_layers/total_forward*100:.1f}% of forward pass")
+    print(f"   • Overhead (embed + LM head) is {(emb_time+lm_head_time)/total_forward*100:.1f}%")
 
 
 def compare_attention_mechanisms():
@@ -160,86 +224,70 @@ def compare_attention_mechanisms():
     print("-"*100)
 
 
-def layer_by_layer_analysis():
-    """Analyze time spent in each layer type."""
-    import time
+def profile_model_forward_backward():
+    """Profile a single forward+backward pass of the model."""
     
+    # Setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=768)
+    # config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=768)
+    # config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=768, attention_type="grouped_query", n_kv_head=4)
+    config = GPTConfig(vocab_size=50257, n_layer=12, n_head=12, n_embd=832, attention_type="grouped_query", n_kv_head=4, mlp_expansion_factor=3)
+
     model = GPT(config).to(device).to(torch.bfloat16)
     
-    B, T = 12, 1024
+    # Create dummy batch
+    B, T = 12, 1024  # batch size, sequence length
     x = torch.randint(0, config.vocab_size, (B, T), device=device)
+    y = torch.randint(0, config.vocab_size, (B, T), device=device)
+    
+    # Warmup
+    print("Warming up...")
+    for _ in range(3):
+        logits, loss = model(x, y)
+        loss.backward()
+    
+    torch.cuda.synchronize()
+    
+    # Profile
+    print("\nProfiling model (forward + backward pass)...")
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as prof:
+        logits, loss = model(x, y)
+        loss.backward()
+    
+    torch.cuda.synchronize()
+    
+    # Print results
+    print("\n" + "="*100)
+    print("TOP 20 OPERATIONS BY CUDA TIME")
+    print("="*100)
+    print(prof.key_averages().table(
+        sort_by="cuda_time_total", 
+        row_limit=20,
+        max_name_column_width=80
+    ))
     
     print("\n" + "="*100)
-    print("LAYER-BY-LAYER TIME BREAKDOWN")
+    print("TOP 20 OPERATIONS BY MEMORY USAGE")
     print("="*100)
+    print(prof.key_averages().table(
+        sort_by="cuda_memory_usage", 
+        row_limit=20,
+        max_name_column_width=80
+    ))
     
-    # Profile individual layers
-    model.eval()
-    with torch.no_grad():
-        # Embedding
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        for _ in range(100):
-            _ = model.transformer.wte(x)
-        torch.cuda.synchronize()
-        emb_time = (time.perf_counter() - start) / 100 * 1000
-        
-        # Get embeddings for subsequent tests
-        hidden = model.transformer.wte(x)
-        
-        # Single attention layer
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        for _ in range(100):
-            _ = model.transformer.h[0].attn(hidden)
-        torch.cuda.synchronize()
-        attn_time = (time.perf_counter() - start) / 100 * 1000
-        
-        # Single MLP layer
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        for _ in range(100):
-            _ = model.transformer.h[0].mlp(hidden)
-        torch.cuda.synchronize()
-        mlp_time = (time.perf_counter() - start) / 100 * 1000
-        
-        # LM head
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        for _ in range(100):
-            _ = model.lm_head(hidden)
-        torch.cuda.synchronize()
-        lm_head_time = (time.perf_counter() - start) / 100 * 1000
-    
-    total_per_layer = attn_time + mlp_time
-    total_all_layers = total_per_layer * 12
-    total_forward = emb_time + total_all_layers + lm_head_time
-    
-    print(f"\n{'Component':<25} {'Time (ms)':<15} {'% of Forward Pass':<20}")
-    print("-"*60)
-    print(f"{'Embedding':<25} {emb_time:>10.4f}      {emb_time/total_forward*100:>10.1f}%")
-    print(f"{'Attention (per layer)':<25} {attn_time:>10.4f}      {attn_time/total_per_layer*100:>10.1f}% of layer")
-    print(f"{'MLP (per layer)':<25} {mlp_time:>10.4f}      {mlp_time/total_per_layer*100:>10.1f}% of layer")
-    print(f"{'All 12 layers':<25} {total_all_layers:>10.4f}      {total_all_layers/total_forward*100:>10.1f}%")
-    print(f"{'LM Head':<25} {lm_head_time:>10.4f}      {lm_head_time/total_forward*100:>10.1f}%")
-    print("-"*60)
-    print(f"{'TOTAL FORWARD':<25} {total_forward:>10.4f}      100.0%")
-    print("-"*60)
-    
-    print("\n📊 Key Insights:")
-    if attn_time > mlp_time:
-        ratio = attn_time / mlp_time
-        print(f"   • Attention is {ratio:.2f}× slower than MLP per layer")
-        print(f"   • Attention takes {attn_time/total_per_layer*100:.1f}% of each layer's time")
-    else:
-        ratio = mlp_time / attn_time
-        print(f"   • MLP is {ratio:.2f}× slower than Attention per layer")
-        print(f"   • MLP takes {mlp_time/total_per_layer*100:.1f}% of each layer's time")
-    
-    print(f"   • Total layers take {total_all_layers/total_forward*100:.1f}% of forward pass")
-    print(f"   • Overhead (embed + LM head) is {(emb_time+lm_head_time)/total_forward*100:.1f}%")
+    # Export for visualization
+    print("\nExporting trace for visualization...")
+    prof.export_chrome_trace("model_profile_trace.json")
+    print("✓ Saved to model_profile_trace.json")
+    print("  View at: chrome://tracing")
 
 
 if __name__ == "__main__":
@@ -253,10 +301,7 @@ if __name__ == "__main__":
     print("="*100)
     
     # Run analyses
-    try:
-        layer_by_layer_analysis()
-    except Exception as e:
-        print(f"Layer-by-layer analysis failed: {e}")
+    layer_by_layer_analysis()
     
     try:
         compare_attention_mechanisms()

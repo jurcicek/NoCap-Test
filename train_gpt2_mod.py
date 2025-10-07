@@ -1187,7 +1187,7 @@ if __name__ == "__main__":
             use_swiglu_mlp=True
         ),  # 124M GPT-2 with SwiGLU MLP
         "d12_mlp3x": GPTConfig(
-            vocab_size=num_vocab, n_layer=12, n_head=13, n_embd=832,
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
             mlp_expansion_factor=3
         ),  # ~124M GPT-2 with 3× MLP expansion and increased n_embd to compensate capacity loss
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
