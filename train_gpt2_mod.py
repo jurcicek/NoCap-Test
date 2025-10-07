@@ -486,15 +486,63 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        expansion_factor = getattr(config, 'mlp_expansion_factor', 4)
+        hidden_dim = expansion_factor * config.n_embd
+        self.c_fc = nn.Linear(config.n_embd, hidden_dim, bias=False)
+        self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)
 
-        print(f"MLP: {config.n_embd=} {4 * config.n_embd=} {config.n_embd=}")
+        print(f"MLP: {config.n_embd=} hidden_dim={hidden_dim} (expansion={expansion_factor}×)")
 
     def forward(self, x):
         x = self.c_fc(x)
         x = F.gelu(x)
         x = self.c_proj(x)
+        return x
+
+
+class SwiGLUMLP(nn.Module):
+    """SwiGLU MLP with SiLU activation and gating mechanism.
+    
+    SwiGLU (Swish-Gated Linear Unit) is an improved MLP architecture that uses:
+    - SiLU (Swish) activation function instead of GELU
+    - Gating mechanism where one branch is activated and the other is gated
+    - This typically provides better performance than standard MLPs
+    
+    Architecture:
+    - Input projection: n_embd -> expansion_factor * n_embd (for both gate and value)
+    - Gate branch: SiLU activation
+    - Value branch: No activation (linear)
+    - Output: gate * value -> n_embd
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        # Use configurable expansion factor (default 4 for backward compatibility)
+        expansion_factor = getattr(config, 'mlp_expansion_factor', 4)
+        intermediate_dim = expansion_factor * config.n_embd
+        
+        # Gate projection (will be activated with SiLU)
+        self.gate_proj = nn.Linear(config.n_embd, intermediate_dim, bias=False)
+        # Value projection (no activation)
+        self.value_proj = nn.Linear(config.n_embd, intermediate_dim, bias=False)
+        # Output projection
+        self.c_proj = nn.Linear(intermediate_dim, config.n_embd, bias=False)
+
+        print(f"SwiGLUMLP: {config.n_embd=} {intermediate_dim=} (expansion={expansion_factor}×)")
+
+    def forward(self, x):
+        # Compute gate and value projections
+        gate = self.gate_proj(x)
+        value = self.value_proj(x)
+        
+        # Apply SiLU activation to gate
+        gate = F.silu(gate)
+        
+        # Element-wise multiplication (gating)
+        gated_value = gate * value
+        
+        # Output projection
+        x = self.c_proj(gated_value)
         return x
 
 
@@ -518,7 +566,11 @@ class Block(nn.Module):
         else:  # standard or default
             self.attn = CausalSelfAttention(config)
         
-        self.mlp = MLP(config)
+        # Initialize MLP based on configuration
+        if getattr(config, 'use_swiglu_mlp', False):
+            self.mlp = SwiGLUMLP(config)
+        else:
+            self.mlp = MLP(config)
         self.attn_scale = 1 / math.sqrt(2 * config.n_layer)
 
         print(f"Block: {config.attention_type=} {config.n_layer=}")
@@ -639,6 +691,7 @@ class GPTConfig:
         window_size: Window size for sliding window attention (only used if attention_type='sliding_window').
         n_kv_head: Number of key-value heads for GQA (only used if attention_type='gqa').
         gradient_checkpointing: If True, use gradient checkpointing for memory efficiency.
+        mlp_expansion_factor: MLP hidden layer expansion factor (default 4 for standard, can be 3 for speed).
     """
     vocab_size: int = 50257
     n_layer: int = 12
@@ -654,6 +707,8 @@ class GPTConfig:
     gradient_checkpointing: bool = True  # Gradient checkpointing for memory efficiency
     use_gated_lm_head: bool = False  # Use the gated LM head
     gated_bottleneck_factor: int = 4 # Bottleneck factor for all gated modules
+    use_swiglu_mlp: bool = False  # Use SwiGLU MLP instead of standard MLP
+    mlp_expansion_factor: int = 4  # MLP expansion factor (4 = standard, 3 = faster)
 
 
 class GPT(nn.Module):
@@ -958,6 +1013,8 @@ if __name__ == "__main__":
             "d12_window|d12_window_large|"
             "d12_gqa|d12_mqa|"
             "d12_gemb|d12_ghead|d12_gemb_ghead|d12_glu_head|"
+            "d12_swiglu|d12_swiglu_post_norm|d12_swiglu_full|"
+            "d12_mlp3x|"
             "d24|d36|d48",
     )
     # token layout for each step of the optimization
@@ -1035,6 +1092,8 @@ if __name__ == "__main__":
         "d12", "d12_post_norm", "d12_post_norm_qk_norm", "d12_mla", 
         "d12_window", "d12_window_large", "d12_gqa", "d12_mqa",
         "d12_gemb", "d12_ghead", "d12_gemb_ghead", "d12_glu_head",
+        "d12_swiglu", "d12_swiglu_post_norm", "d12_swiglu_full",
+        "d12_mlp3x",
         "d24", "d36", "d48",
     }
     # set up DDP (distributed data parallel). torchrun sets this env variable
@@ -1123,6 +1182,14 @@ if __name__ == "__main__":
             vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
             use_gated_lm_head=True
         ),  # 124M GPT-2 with gated LM head
+        "d12_swiglu": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=12, n_embd=768,
+            use_swiglu_mlp=True
+        ),  # 124M GPT-2 with SwiGLU MLP
+        "d12_mlp3x": GPTConfig(
+            vocab_size=num_vocab, n_layer=12, n_head=13, n_embd=832,
+            mlp_expansion_factor=3
+        ),  # ~124M GPT-2 with 3× MLP expansion and increased n_embd to compensate capacity loss
         "d24": GPTConfig(vocab_size=num_vocab, n_layer=24, n_head=16, n_embd=1024),
         "d36": GPTConfig(vocab_size=num_vocab, n_layer=36, n_head=20, n_embd=1280),
         "d48": GPTConfig(vocab_size=num_vocab, n_layer=48, n_head=25, n_embd=1600),
